@@ -228,7 +228,7 @@ def main():
         import mediapipe.python.solutions.face_mesh as mp_face_mesh
         face_mesh = mp_face_mesh.FaceMesh(
             max_num_faces=1,
-            refine_landmarks=True,
+            refine_landmarks=False,  # Tối ưu hóa FPS cho CPU Raspberry Pi 4 (không cần mống mắt)
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )

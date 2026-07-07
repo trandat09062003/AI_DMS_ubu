@@ -22,10 +22,15 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Tự động cài đặt RPi.GPIO nếu chạy trên Raspberry Pi
+# Tự động cài đặt thư viện GPIO phù hợp
 if grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
-    echo "[INFO] Phat hien chay tren Raspberry Pi. Dang tu dong cai dat RPi.GPIO..."
-    venv/bin/pip install RPi.GPIO
+    if grep -q "Raspberry Pi 5" /proc/device-tree/model 2>/dev/null; then
+        echo "[INFO] Phat hien chay tren Raspberry Pi 5. Dang tu dong cai dat rpi-lgpio..."
+        venv/bin/pip install rpi-lgpio
+    else
+        echo "[INFO] Phat hien chay tren Raspberry Pi. Dang tu dong cai dat RPi.GPIO..."
+        venv/bin/pip install RPi.GPIO
+    fi
 fi
 
 # Hiển thị các thiết bị video đang kết nối để chẩn đoán
