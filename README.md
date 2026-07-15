@@ -78,7 +78,15 @@ python3 drowsiness_detector.py
 
 *(Nếu muốn tự huấn luyện lại mô hình LSTM từ đầu, hãy chạy: `python3 train_lstm.py`)*
 
-### 4. Thiết lập khởi động cùng hệ thống (Autostart)
+### 4. Các tham số cấu hình tùy chọn (Command-line Arguments)
+Bạn có thể tùy chọn truyền thêm các tham số khi chạy thông qua script `./run_dms.sh` hoặc trực tiếp qua lệnh `python3 drowsiness_detector.py`:
+- `--scale <giá_trị>`: Tỉ lệ kích thước cửa sổ hiển thị (mặc định là `1.0`). Ví dụ truyền `--scale 0.5` để thu nhỏ một nửa hoặc `--scale 0.7` để thu nhỏ còn 70%. Việc này giúp giao diện hiển thị gọn gàng hơn trên các màn hình nhỏ của Raspberry Pi và giúp hệ thống chạy nhẹ hơn.
+- `--camera <chỉ_số>`: Chỉ định chỉ số camera sử dụng (ví dụ: `--camera 0`).
+- `--enhance`: Bắt buộc kích hoạt chế độ tăng cường độ tương phản CLAHE.
+- `--no-enhance`: Vô hiệu hóa chế độ tự động tăng cường độ tương phản.
+- `--show-enhanced`: Hiển thị khung hình camera sau khi đã được tăng cường CLAHE lên dashboard.
+
+### 5. Thiết lập khởi động cùng hệ thống (Autostart)
 Để ứng dụng tự động kích hoạt sau khi khởi động desktop Ubuntu:
 1. Tạo một file cấu hình autostart tại đường dẫn `~/.config/autostart/ai_dms.desktop`.
 2. Ghi nội dung cấu hình trỏ đường dẫn thực thi tới file `run_dms.sh`.

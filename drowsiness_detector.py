@@ -58,7 +58,34 @@ MODEL_POINTS = np.array([
 
 # --- Quản lý Âm thanh Cảnh báo bằng Luồng riêng (Threading) ---
 # Tránh bị đóng băng khung hình camera khi gọi còi bíp đồng bộ
-alarm_level = 0  # 0: bình thường, 1: mệt nhẹ (no beep), 2: mệt vừa (beep chậm), 3: nguy hiểm (beep nhanh)
+alarm_level = 0  # 0: bình thường, 1: mệt nhẹ/hiệu chuẩn (beep chậm), 2: mệt vừa (beep chậm + rung), 3: nguy hiểm (beep nhanh + rung)
+
+def sleep_and_check(duration):
+    """Ngủ trong thời gian ngắn và phản ứng lập tức nếu alarm_level chuyển về 0"""
+    global alarm_level
+    steps = int(duration / 0.05)
+    for _ in range(steps):
+        if alarm_level == 0:
+            if GPIO_AVAILABLE:
+                try:
+                    GPIO.output(MOTOR_PIN, GPIO.LOW)
+                    GPIO.output(BUZZER_PIN, GPIO.LOW)
+                except:
+                    pass
+            return True
+        time.sleep(0.05)
+    rem = duration % 0.05
+    if rem > 0:
+        if alarm_level == 0:
+            if GPIO_AVAILABLE:
+                try:
+                    GPIO.output(MOTOR_PIN, GPIO.LOW)
+                    GPIO.output(BUZZER_PIN, GPIO.LOW)
+                except:
+                    pass
+            return True
+        time.sleep(rem)
+    return alarm_level == 0
 
 def alarm_worker():
     global alarm_level
@@ -69,30 +96,30 @@ def alarm_worker():
                 if alarm_level == 0:
                     GPIO.output(MOTOR_PIN, GPIO.LOW)
                     GPIO.output(BUZZER_PIN, GPIO.LOW)
-                    time.sleep(0.1)
+                    time.sleep(0.05)
                 elif alarm_level == 1:
                     GPIO.output(MOTOR_PIN, GPIO.LOW)
                     GPIO.output(BUZZER_PIN, GPIO.HIGH)
-                    time.sleep(0.1)
+                    if sleep_and_check(0.1): continue
                     GPIO.output(BUZZER_PIN, GPIO.LOW)
-                    time.sleep(0.9)
+                    if sleep_and_check(0.9): continue
                 elif alarm_level == 2:
                     GPIO.output(MOTOR_PIN, GPIO.HIGH)
                     GPIO.output(BUZZER_PIN, GPIO.HIGH)
-                    time.sleep(0.2)
+                    if sleep_and_check(0.2): continue
                     GPIO.output(BUZZER_PIN, GPIO.LOW)
-                    time.sleep(0.3)
+                    if sleep_and_check(0.3): continue
                 elif alarm_level == 3:
                     GPIO.output(MOTOR_PIN, GPIO.HIGH)
                     GPIO.output(BUZZER_PIN, GPIO.HIGH)
-                    time.sleep(0.1)
+                    if sleep_and_check(0.1): continue
                     GPIO.output(BUZZER_PIN, GPIO.LOW)
-                    time.sleep(0.1)
+                    if sleep_and_check(0.1): continue
             except:
-                time.sleep(0.1)
+                time.sleep(0.05)
         # 2. Chế độ PC thường (không có phần cứng còi chíp/rung)
         else:
-            time.sleep(0.1)
+            time.sleep(0.05)
 
 threading.Thread(target=alarm_worker, daemon=True).start()
 
@@ -182,6 +209,18 @@ def draw_bar(img, label, val, max_val, x, y, w, h, color):
 
 def main():
     global alarm_level, GPIO_AVAILABLE
+    
+    # Khởi tạo argparse để cấu hình tham số
+    import argparse
+    parser = argparse.ArgumentParser(description="DMS: HE THONG CANH BAO NGU GAT THOI GIAN THUC (AI)")
+    parser.add_argument("--camera", type=int, default=None, help="Chi so camera su dung (mac dinh thu tu dong tu 0-10)")
+    parser.add_argument("--mono", action="store_true", help="Che do giai ma don sac (Monochrome) cho camera Raw Bayer")
+    parser.add_argument("--enhance", action="store_true", help="Bat buoc bat tang cuong do tuong phan CLAHE cho camera den trang / hong ngoai")
+    parser.add_argument("--no-enhance", action="store_true", help="Vo hieu hoa tu dong tang cuong do tuong phan")
+    parser.add_argument("--show-enhanced", action="store_true", help="Hien thi khung hinh da tang cuong CLAHE len man hinh Dashboard")
+    parser.add_argument("--scale", type=float, default=1.0, help="Ti le thu nho/phong to cua so hien thi (vi du: 0.5 de thu nho mot nua)")
+    args = parser.parse_args()
+
     print("====================================================")
     print("DMS: HE THONG CANH BAO NGU GAT THOI GIAN THUC (AI)")
     print("====================================================")
@@ -189,25 +228,73 @@ def main():
     # Cấu hình camera
     cap = None
     simulated_mode = False
+    raw_bayer_mode = False
+    raw_bayer_format = None
     
-    # Thử mở camera ở các chỉ số từ 0 đến 10 (đề phòng Raspberry Pi nhận chỉ số khác như /dev/video4 hoặc /dev/video10)
-    for camera_idx in range(11):
+    # Quét danh sách camera (Nếu truyền --camera sẽ chỉ quét camera đó, nếu không sẽ quét tự động từ 0-10)
+    camera_indices = [args.camera] if args.camera is not None else list(range(11))
+    
+    for camera_idx in camera_indices:
         try:
             print(f"[INFO] Dang thu mo camera index {camera_idx}...")
             temp_cap = cv2.VideoCapture(camera_idx)
             if temp_cap.isOpened():
-                # Đọc thử 1 frame để chắc chắn đây là thiết bị thu hình thực sự
-                ret, _ = temp_cap.read()
+                # Đọc thử 1 frame mặc định
+                ret = False
+                try:
+                    ret, _ = temp_cap.read()
+                except:
+                    pass
+                
                 if ret:
                     cap = temp_cap
                     print(f"[SUCCESS] Da mo camera index {camera_idx} thanh cong!")
                     break
                 else:
+                    # Thử chế độ Raw Bayer (dành cho CSI Camera trên Pi không có libcamerify)
+                    print(f"[INFO] Mac dinh camera index {camera_idx} khong doc duoc frame. Dang thu cau hinh che do Raw Bayer...")
+                    temp_cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+                    
+                    # Thử định dạng GB10 (10-bit Bayer không nén, 614400 bytes cho 640x480)
+                    temp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('G', 'B', '1', '0'))
+                    temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    ret_bayer = False
+                    try:
+                        ret_bayer, frame_bayer = temp_cap.read()
+                    except:
+                        pass
+                        
+                    if ret_bayer and frame_bayer is not None and frame_bayer.size == 614400:
+                        cap = temp_cap
+                        raw_bayer_mode = True
+                        raw_bayer_format = 'GB10'
+                        print(f"[SUCCESS] Da mo camera index {camera_idx} o che do Raw Bayer GB10!")
+                        break
+                    
+                    # Thử định dạng pGAA (10-bit Bayer nén MIPI, 384000 bytes cho 640x480)
+                    temp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('p', 'G', 'A', 'A'))
+                    temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    ret_bayer = False
+                    try:
+                        ret_bayer, frame_bayer = temp_cap.read()
+                    except:
+                        pass
+                        
+                    if ret_bayer and frame_bayer is not None and frame_bayer.size == 384000:
+                        cap = temp_cap
+                        raw_bayer_mode = True
+                        raw_bayer_format = 'pGAA'
+                        print(f"[SUCCESS] Da mo camera index {camera_idx} o che do Raw Bayer pGAA!")
+                        break
+                    
+                    # Nếu thất bại hoàn toàn, giải phóng camera
                     temp_cap.release()
             else:
                 temp_cap.release()
-        except:
-            pass
+        except Exception as e:
+            print(f"[INFO] Loi khi thu mo camera index {camera_idx}: {e}")
             
     if cap is None:
         print("====================================================")
@@ -334,20 +421,54 @@ def main():
     blink_rate = 0
     yawn_count = 0
     
-    # Tạo giao diện hiển thị
-    cv2.namedWindow("DMS - Drowsiness Detection Dashboard", cv2.WINDOW_AUTOSIZE)
+    # Tạo giao diện hiển thị (Su dung WINDOW_NORMAL de cho phep keo gian thu nho)
+    cv2.namedWindow("DMS - Drowsiness Detection Dashboard", cv2.WINDOW_NORMAL)
     
     sim_time_start = time.time()
     
     while True:
         # 1. Đọc frame (từ camera thật hoặc tạo dữ liệu giả lập)
         if not simulated_mode:
-            ret, frame = cap.read()
-            if not ret:
-                print("[ERROR] Mat ket noi voi camera.")
-                break
+            if raw_bayer_mode:
+                ret, raw_frame = cap.read()
+                if not ret or raw_frame is None:
+                    print("[ERROR] Mat ket noi voi camera (Raw mode).")
+                    break
+                try:
+                    # Giải mã raw_frame sang BGR
+                    if raw_bayer_format == 'GB10':
+                        raw_16 = np.frombuffer(raw_frame.tobytes(), dtype=np.uint16).reshape((480, 640))
+                        img_8 = (raw_16 >> 2).astype(np.uint8)
+                        if args.mono:
+                            frame = cv2.cvtColor(img_8, cv2.COLOR_GRAY2BGR)
+                        else:
+                            frame = cv2.cvtColor(img_8, cv2.COLOR_BayerGB2BGR)
+                    elif raw_bayer_format == 'pGAA':
+                        raw_bytes = np.frombuffer(raw_frame.tobytes(), dtype=np.uint8)
+                        img_8 = raw_bytes.reshape(-1, 5)[:, :4].reshape((480, 640))
+                        if args.mono:
+                            frame = cv2.cvtColor(img_8, cv2.COLOR_GRAY2BGR)
+                        else:
+                            frame = cv2.cvtColor(img_8, cv2.COLOR_BayerGB2BGR)
+                    else:
+                        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                except Exception as e:
+                    print(f"[ERROR] Loi giai ma Bayer: {e}")
+                    break
+            else:
+                ret, frame = cap.read()
+                if not ret:
+                    print("[ERROR] Mat ket noi voi camera.")
+                    break
             # Lật ảnh ngang cho cảm giác gương tự nhiên
             frame = cv2.flip(frame, 1)
+            
+            # Đảm bảo ảnh luôn ở dạng 3 kênh BGR để tránh lỗi ghép hstack với dashboard hoặc lỗi xử lý MediaPipe/CLAHE
+            if frame is not None:
+                if len(frame.shape) == 2:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                elif len(frame.shape) == 3 and frame.shape[2] == 1:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
         else:
             # Tạo frame giả lập màu tối
             frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -369,6 +490,10 @@ def main():
             cv2.putText(frame, "Please wait...", (260, 260), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
             combined_img = np.hstack((frame, dashboard))
+            if args.scale != 1.0 and args.scale > 0:
+                h_new = int(combined_img.shape[0] * args.scale)
+                w_new = int(combined_img.shape[1] * args.scale)
+                combined_img = cv2.resize(combined_img, (w_new, h_new))
             cv2.imshow("DMS - Drowsiness Detection Dashboard", combined_img)
             cv2.waitKey(30)
             continue
@@ -383,8 +508,46 @@ def main():
         
         # 3. Phân tích hình ảnh
         if not simulated_mode:
-            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = face_mesh.process(img_rgb)
+            # Tự động phát hiện ảnh đơn sắc (grayscale/monochrome)
+            is_mono = False
+            if frame is not None and len(frame.shape) == 3:
+                # Downsample nhỏ để kiểm tra kênh nhanh tránh ảnh hưởng FPS
+                small_frame = cv2.resize(frame, (64, 48))
+                b, g, r = cv2.split(small_frame)
+                diff_bg = np.max(np.abs(b.astype(np.int16) - g.astype(np.int16)))
+                diff_gr = np.max(np.abs(g.astype(np.int16) - r.astype(np.int16)))
+                if diff_bg < 5 and diff_gr < 5:
+                    is_mono = True
+            
+            # Tính độ tương phản (độ lệch chuẩn của độ sáng) để tự động kích hoạt khi trời tối/thiếu sáng
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            contrast = gray.std()
+            
+            # Quyết định có áp dụng tăng cường độ tương phản CLAHE không
+            should_enhance = args.enhance or (
+                not args.no_enhance and (is_mono or contrast < 35.0)
+            )
+            
+            if should_enhance:
+                try:
+                    # Chuyển sang không gian màu LAB để áp dụng CLAHE lên kênh độ sáng L (tránh đổi màu nếu là ảnh màu)
+                    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+                    l, a, b = cv2.split(lab)
+                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+                    cl = clahe.apply(l)
+                    enhanced_bgr = cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2BGR)
+                    img_rgb_detect = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB)
+                    
+                    # Nếu cấu hình hiển thị ảnh tăng cường hoặc đang dùng cam đen trắng/hồng ngoại
+                    # hiển thị ảnh tăng cường giúp người lái xe theo dõi dễ hơn trên dashboard
+                    if args.show_enhanced or is_mono:
+                        frame = enhanced_bgr
+                except Exception as e:
+                    img_rgb_detect = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            else:
+                img_rgb_detect = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+            results = face_mesh.process(img_rgb_detect)
             
             if results.multi_face_landmarks:
                 detected_face = True
@@ -484,6 +647,7 @@ def main():
 
         # 4. Hiệu chuẩn (Calibration Stage)
         if detected_face and not calibrated:
+            alarm_level = 1  # Còi chậm để báo hiệu người dùng nhìn thẳng camera hiệu chuẩn
             calib_count += 1
             calib_ears.append(ear)
             calib_mars.append(mar)
@@ -506,6 +670,7 @@ def main():
                 # Giới hạn ngưỡng nhắm mắt trong khoảng sinh học [0.20, 0.24] để tăng độ chính xác thực tế
                 ear_limit = max(0.20, min(0.24, ear_baseline * 0.80))
                 calibrated = True
+                alarm_level = 0  # Tắt còi khi hiệu chuẩn hoàn tất
                 print("====================================================")
                 print("[SUCCESS] Hieu chuan hoan tat!")
                 print(f"EAR Baseline: {ear_baseline:.3f} | Nguong nham mat (EAR Limit): {ear_limit:.3f}")
@@ -679,6 +844,13 @@ def main():
                 status_color = (0, 0, 255)  # Red
                 alarm_level = 3
                 fatigue_score = 0.95
+
+            # Nếu người lái xe trở lại trạng thái bình thường (mắt mở, đầu thẳng, không ngáp)
+            # thì bắt buộc dừng còi báo ngay lập tức.
+            if not is_eye_closed and not is_head_tilted and not is_yawning:
+                alarm_level = 0
+                status_text = "TINH TAO"
+                status_color = (0, 255, 0)
                 
             # Đèn báo viền đỏ nhấp nháy trên màn hình camera nếu mệt mỏi nặng
             if alarm_level >= 2:
@@ -721,7 +893,8 @@ def main():
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
             
         else:
-            # Chưa hiệu chuẩn xong (hiển thị giao diện hướng dẫn)
+            # Chưa hiệu chuẩn xong và chưa phát hiện khuôn mặt (hiển thị giao diện hướng dẫn)
+            alarm_level = 0
             cv2.putText(dashboard, "BASELINING INITIAL STATE...", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
             cv2.putText(frame, "PLEASE LOOK STRAIGHT AT CAMERA", (100, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
@@ -788,6 +961,11 @@ def main():
         # 6. Ghép khung hình camera với Dashboard thống kê
         combined_img = np.hstack((frame, dashboard))
         
+        if args.scale != 1.0 and args.scale > 0:
+            h_new = int(combined_img.shape[0] * args.scale)
+            w_new = int(combined_img.shape[1] * args.scale)
+            combined_img = cv2.resize(combined_img, (w_new, h_new))
+            
         # Hiển thị giao diện chính
         cv2.imshow("DMS - Drowsiness Detection Dashboard", combined_img)
         
@@ -803,6 +981,7 @@ def main():
             calib_pitches.clear()
             calib_yaws.clear()
             calib_rolls.clear()
+            alarm_level = 0  # Reset còi ngay lập tức khi nhấn phím 'r'
             print("[INFO] Yeu cau hieu chuan lai baseline...")
 
     # Giải phóng tài nguyên

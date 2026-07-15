@@ -6,3 +6,5 @@ __pycache__/
 .gemini/
 .agents/
 venv/
+.setup_done
+*.jpg
