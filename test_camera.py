@@ -18,6 +18,24 @@ def main():
     raw_bayer_format = None
     camera_idx_found = -1
     
+    # Load camera configuration if available
+    camera_config = None
+    config_path = "camera_config.json"
+    import json
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                camera_config = json.load(f)
+            print(f"Loaded camera configuration: {camera_config}")
+        except Exception as e:
+            print(f"Failed to load {config_path}: {e}")
+
+    bayer_pattern = "GB"  # Default
+    camera_flip_code = None
+    if camera_config is not None:
+        bayer_pattern = camera_config.get("bayer_pattern", "GB")
+        camera_flip_code = camera_config.get("flip_code", None)
+    
     # Quét danh sách camera (Nếu truyền --camera sẽ chỉ quét camera đó, nếu không sẽ quét tự động từ 0-10)
     camera_indices = [args.camera] if args.camera is not None else list(range(11))
     
@@ -90,24 +108,31 @@ def main():
         if raw_bayer_mode:
             ret, raw_frame = cap.read()
             if ret and raw_frame is not None:
+                bayer_bgr_code = getattr(cv2, f"COLOR_Bayer{bayer_pattern}2BGR", cv2.COLOR_BayerGB2BGR)
+                bayer_gray_code = getattr(cv2, f"COLOR_Bayer{bayer_pattern}2GRAY", cv2.COLOR_BayerGB2GRAY)
+                
                 if raw_bayer_format == 'GB10':
                     raw_16 = np.frombuffer(raw_frame.tobytes(), dtype=np.uint16).reshape((480, 640))
                     img_8 = (raw_16 >> 2).astype(np.uint8)
                     if args.mono:
-                        frame = cv2.cvtColor(img_8, cv2.COLOR_GRAY2BGR)
+                        img_gray = cv2.cvtColor(img_8, bayer_gray_code)
+                        frame = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
                     else:
-                        frame = cv2.cvtColor(img_8, cv2.COLOR_BayerGB2BGR)
+                        frame = cv2.cvtColor(img_8, bayer_bgr_code)
                 elif raw_bayer_format == 'pGAA':
                     raw_bytes = np.frombuffer(raw_frame.tobytes(), dtype=np.uint8)
                     img_8 = raw_bytes.reshape(-1, 5)[:, :4].reshape((480, 640))
                     if args.mono:
-                        frame = cv2.cvtColor(img_8, cv2.COLOR_GRAY2BGR)
+                        img_gray = cv2.cvtColor(img_8, bayer_gray_code)
+                        frame = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
                     else:
-                        frame = cv2.cvtColor(img_8, cv2.COLOR_BayerGB2BGR)
+                        frame = cv2.cvtColor(img_8, bayer_bgr_code)
         else:
             ret, frame = cap.read()
             
         if frame is not None:
+            if camera_flip_code is not None:
+                frame = cv2.flip(frame, camera_flip_code)
             if len(frame.shape) == 2:
                 frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
             elif len(frame.shape) == 3 and frame.shape[2] == 1:

@@ -208,6 +208,26 @@ def draw_bar(img, label, val, max_val, x, y, w, h, color):
     fill_w = int(min(1.0, val / (max_val + 1e-6)) * w)
     cv2.rectangle(img, (x, y), (x + fill_w, y + h), color, -1)
 
+def set_camera_controls(exposure_val, gain_val):
+    """Thiết lập thông số phơi sáng và gain của camera qua v4l2-ctl (chuyên dụng cho Raspberry Pi CSI)"""
+    import subprocess
+    import os
+    dev_path = "/dev/v4l-subdev0"
+    if not os.path.exists(dev_path):
+        dev_path = "/dev/video0"
+    if not os.path.exists(dev_path):
+        return
+    try:
+        subprocess.run([
+            "v4l2-ctl", "-d", dev_path,
+            "-c", "auto_exposure=1",
+            "-c", "gain_automatic=0",
+            "-c", f"exposure={exposure_val}",
+            "-c", f"analogue_gain={gain_val}"
+        ], capture_output=True)
+    except Exception as e:
+        print(f"[WARN] Khong the cau hinh camera controls: {e}")
+
 # --- Luồng Ứng Dụng Chính ---
 
 def main():
@@ -233,6 +253,44 @@ def main():
     simulated_mode = False
     raw_bayer_mode = False
     raw_bayer_format = None
+    
+    # Load camera configuration if available
+    camera_config = None
+    config_path = "camera_config.json"
+    import json
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                camera_config = json.load(f)
+            print(f"[INFO] Loaded camera configuration: {camera_config}")
+        except Exception as e:
+            print(f"[WARN] Failed to load {config_path}: {e}")
+
+    bayer_pattern = "GB"  # Default
+    camera_flip_code = None
+    if camera_config is not None:
+        bayer_pattern = camera_config.get("bayer_pattern", "GB")
+        camera_flip_code = camera_config.get("flip_code", None)
+
+    
+    # Khởi tạo thông số phơi sáng và điều khiển phơi sáng tự động (AEGC)
+    current_exposure = 250
+    current_gain = 500
+    frame_count = 0
+    
+    def aegc_loop(mean_brightness):
+        nonlocal current_exposure, current_gain
+        target = 120.0
+        diff = target - mean_brightness
+        if abs(diff) > 8:
+            step_exp = int(diff * 1.2)
+            step_gain = int(diff * 1.8)
+            new_exposure = max(4, min(500, current_exposure + step_exp))
+            new_gain = max(16, min(1023, current_gain + step_gain))
+            if new_exposure != current_exposure or new_gain != current_gain:
+                current_exposure = new_exposure
+                current_gain = new_gain
+                set_camera_controls(current_exposure, current_gain)
     
     # Quét danh sách camera (Nếu truyền --camera sẽ chỉ quét camera đó, nếu không sẽ quét tự động từ 0-10)
     camera_indices = [args.camera] if args.camera is not None else list(range(11))
@@ -311,6 +369,11 @@ def main():
         print("====================================================")
         simulated_mode = True
         
+    # Khởi tạo phơi sáng mặc định nếu ở chế độ Raw Bayer
+    if not simulated_mode and raw_bayer_mode:
+        print(f"[INFO] Thiet lap phoi sang va gain ban dau cho Raw Bayer: exposure={current_exposure}, gain={current_gain}")
+        set_camera_controls(current_exposure, current_gain)
+        
     # Khởi tạo MediaPipe Face Mesh (Graceful fallback nếu không hỗ trợ)
     mediapipe_available = True
     face_mesh = None
@@ -350,6 +413,12 @@ def main():
     db_path = "dms_history.db"
     db_conn = sqlite3.connect(db_path)
     db_cursor = db_conn.cursor()
+    # Tối ưu hóa SQLite cho thẻ nhớ SD Card trên Raspberry Pi
+    try:
+        db_cursor.execute("PRAGMA journal_mode=WAL;")
+        db_cursor.execute("PRAGMA synchronous=NORMAL;")
+    except:
+        pass
     db_cursor.execute("""
         CREATE TABLE IF NOT EXISTS dms_logs (
             timestamp TEXT PRIMARY KEY,
@@ -439,22 +508,33 @@ def main():
                     break
                 try:
                     # Giải mã raw_frame sang BGR
+                    bayer_bgr_code = getattr(cv2, f"COLOR_Bayer{bayer_pattern}2BGR", cv2.COLOR_BayerGB2BGR)
+                    bayer_gray_code = getattr(cv2, f"COLOR_Bayer{bayer_pattern}2GRAY", cv2.COLOR_BayerGB2GRAY)
+
                     if raw_bayer_format == 'GB10':
                         raw_16 = np.frombuffer(raw_frame.tobytes(), dtype=np.uint16).reshape((480, 640))
                         img_8 = (raw_16 >> 2).astype(np.uint8)
                         if args.mono:
-                            frame = cv2.cvtColor(img_8, cv2.COLOR_GRAY2BGR)
+                            img_gray = cv2.cvtColor(img_8, bayer_gray_code)
+                            frame = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
                         else:
-                            frame = cv2.cvtColor(img_8, cv2.COLOR_BayerGB2BGR)
+                            frame = cv2.cvtColor(img_8, bayer_bgr_code)
                     elif raw_bayer_format == 'pGAA':
                         raw_bytes = np.frombuffer(raw_frame.tobytes(), dtype=np.uint8)
                         img_8 = raw_bytes.reshape(-1, 5)[:, :4].reshape((480, 640))
                         if args.mono:
-                            frame = cv2.cvtColor(img_8, cv2.COLOR_GRAY2BGR)
+                            img_gray = cv2.cvtColor(img_8, bayer_gray_code)
+                            frame = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
                         else:
-                            frame = cv2.cvtColor(img_8, cv2.COLOR_BayerGB2BGR)
+                            frame = cv2.cvtColor(img_8, bayer_bgr_code)
                     else:
                         frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                        
+                    # Tự động điều chỉnh phơi sáng động (AEGC) mỗi 5 frames
+                    if 'img_8' in locals():
+                        frame_count += 1
+                        if frame_count % 5 == 0:
+                            aegc_loop(np.mean(img_8))
                 except Exception as e:
                     print(f"[ERROR] Loi giai ma Bayer: {e}")
                     break
@@ -463,8 +543,11 @@ def main():
                 if not ret:
                     print("[ERROR] Mat ket noi voi camera.")
                     break
-            # Lật ảnh ngang cho cảm giác gương tự nhiên
-            frame = cv2.flip(frame, 1)
+            # Lật ảnh ngang cho cảm giác gương tự nhiên hoặc dùng cấu hình góc quay
+            if camera_flip_code is not None:
+                frame = cv2.flip(frame, camera_flip_code)
+            else:
+                frame = cv2.flip(frame, 1)
             
             # Đảm bảo ảnh luôn ở dạng 3 kênh BGR để tránh lỗi ghép hstack với dashboard hoặc lỗi xử lý MediaPipe/CLAHE
             if frame is not None:
@@ -973,7 +1056,7 @@ def main():
         cv2.imshow("DMS - Drowsiness Detection Dashboard", combined_img)
         
         # Nhận phím bấm từ người dùng (q để thoát, r để hiệu chuẩn lại)
-        key = cv2.waitKey(30) & 0xFF
+        key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
         elif key == ord('r'):
