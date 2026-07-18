@@ -65,6 +65,12 @@ def train():
     print("Generating synthetic dataset...")
     X, y = generate_synthetic_data(num_samples=2000, seq_len=60)
     
+    # Shuffle dataset to ensure train/validation sets are balanced and unbiased
+    indices = np.arange(len(X))
+    np.random.shuffle(indices)
+    X = X[indices]
+    y = y[indices]
+    
     # Split train/test (80/20)
     split_idx = int(0.8 * len(X))
     X_train, X_val = X[:split_idx], X[split_idx:]

@@ -2,6 +2,9 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import torch
+# Tối ưu hóa số luồng PyTorch trên Raspberry Pi 4 để giảm tải CPU và tránh overhead quản lý luồng
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 import time
 import os
 import threading
