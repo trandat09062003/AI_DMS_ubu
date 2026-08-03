@@ -1319,6 +1319,11 @@ def main():
             recalibrate_requested = False
             if current_session_id is not None:
                 save_session_to_db()
+            try:
+                from audio_manager import record_event_audio
+                record_event_audio("reset_recalibrate", 10)
+            except Exception:
+                pass
             calibrated = False
             calib_count = 0
             calib_ears.clear()
