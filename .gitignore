@@ -10,3 +10,4 @@ venv/
 *.jpg
 audio_logs/
 *.wav
+telegram_config.json
