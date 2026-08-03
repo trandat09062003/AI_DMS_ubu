@@ -89,10 +89,21 @@ else
 fi
 echo "===================================================="
 
+# Kiểm tra camera là USB Webcam (uvcvideo) hay CSI Camera
+IS_USB_CAM=false
+if command -v v4l2-ctl >/dev/null 2>&1; then
+    if v4l2-ctl -d /dev/video0 --info 2>/dev/null | grep -iq "uvcvideo\|USB"; then
+        IS_USB_CAM=true
+    fi
+fi
+
 # Run the program
 echo "[INFO] Starting Driver Monitoring System..."
-if command -v libcamerify >/dev/null 2>&1; then
-    echo "[INFO] Phat hien libcamerify. Dang chay ung dung qua libcamerify..."
+if [ "$IS_USB_CAM" = true ]; then
+    echo "[INFO] Phat hien USB Webcam (UVC). Dang chay truc tiep voi Python..."
+    venv/bin/python3 drowsiness_detector.py "$@"
+elif command -v libcamerify >/dev/null 2>&1; then
+    echo "[INFO] Phat hien Camera CSI & libcamerify. Dang chay ung dung qua libcamerify..."
     libcamerify venv/bin/python3 drowsiness_detector.py "$@"
 else
     if grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then

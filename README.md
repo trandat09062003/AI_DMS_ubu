@@ -1,119 +1,102 @@
-# Driver Monitoring System (DMS) - AI Detection
+# Driver Monitoring System (DMS) - AI Detection & Smart IoT Control
 
-Hệ thống giám sát trạng thái tài xế (phát hiện buồn ngủ, ngáp, mất tập trung) thời gian thực bằng trí tuệ nhân tạo. Dự án kết hợp mô hình trích xuất đặc trưng khuôn mặt (MediaPipe Face Mesh) và mô hình học sâu tuần hoàn LSTM (PyTorch) nhằm phân tích chuỗi hành vi thời gian thực trong 60 giây và đưa ra dự báo sớm trạng thái buồn ngủ/vi ngủ (Microsleep).
+Hệ thống giám sát trạng thái tài xế (phát hiện buồn ngủ, ngáp, mất tập trung) thời gian thực bằng Trí tuệ Nhân tạo (AI) kết hợp Hệ thống Quản lý Hành trình & Cấu hình IoT Không Cần Màn Hình (Headless). 
 
-> **Lưu ý quan trọng**: Hệ thống được phát triển và tối ưu hóa chuyên biệt cho môi trường **Ubuntu / Linux** và **Raspberry Pi** (không hỗ trợ hệ điều hành Windows).
+Dự án kết hợp mô hình trích xuất đặc trưng khuôn mặt (**MediaPipe Face Mesh**), mạng học sâu chuỗi thời gian **LSTM (PyTorch)**, cùng giao diện Web Dashboard quản lý hành trình trên tên miền cố định **`http://wifi.local`**.
 
----
-
-## Các tính năng chính
-
-- **Phân tích đặc trưng sinh học thời gian thực**:
-  - **EAR (Eye Aspect Ratio)**: Đo lường độ mở mắt động theo trạng thái sinh lý của tài xế.
-  - **MAR (Mouth Aspect Ratio)**: Đánh giá biên độ mở miệng để phát hiện hành vi ngáp.
-  - **Head Pose Estimation (SolvePnP)**: Tính toán góc cúi/ngửa (Pitch), nghiêng (Roll) và quay đầu (Yaw) dưới dạng tọa độ 3D.
-- **Tính toán chỉ số PERCLOS**: Đánh giá phần trăm thời gian nhắm mắt tích lũy (5 giây gần nhất) để nhận diện trạng thái mệt mỏi khách quan.
-- **Dự báo vi ngủ sớm bằng LSTM**: Sử dụng chuỗi trượt 60 giây để dự đoán sớm nguy cơ buồn ngủ trước khi xảy ra sự cố.
-- **Cơ chế phản hồi cảnh báo khẩn cấp (Safety Overrides)**:
-  - Báo động tức thì nếu nhắm mắt liên tục > 1.0 giây.
-  - Báo động tức thì nếu lệch đầu, gục đầu quá góc quy định > 1.0 giây.
-  - Cảnh báo mất dấu khuôn mặt (Face Lost) nếu tài xế lệch khỏi khung hình > 1.5 giây.
-- **Tích hợp phần cứng (Raspberry Pi GPIO)**: Tự động phát hiện và kích hoạt mô-tơ rung (GPIO 17) và còi chíp (GPIO 27) tương thích theo từng cấp độ nguy hiểm.
-- **Lịch sử hoạt động**: Tự động lưu trữ thông số trạng thái mỗi giây vào cơ sở dữ liệu SQLite (`dms_history.db`) phục vụ giám sát và phân tích hành trình.
+> **Lưu ý quan trọng**: Hệ thống được phát triển và tối ưu hóa chuyên biệt cho môi trường **Ubuntu / Linux** và **Raspberry Pi** (không hỗ trợ Windows).
 
 ---
 
-## Cấu trúc thư mục dự án
+## 🌟 Các Tính Năng Nổi Bật Mới Cập Nhật
+
+### 1. Tối Ưu Hóa Tối Đa Cho Camera USB (UVC Webcams)
+* **Triệt tiêu độ trễ/Lag khung hình (`CAP_PROP_BUFFERSIZE = 1`)**: Xóa sạch hàng đợi bộ nhớ đệm V4L2 giúp xử lý khung hình thời gian thực (Real-time).
+* **Định dạng & Độ phân giải chuẩn hóa (MJPG @ 1280x720 - 30 FPS)**: Đặt thứ tự cấu hình `FOURCC` chuẩn giúp nhận 30 FPS mượt mà mà không làm nóng CPU như 1080p.
+* **Tự động bỏ qua Raw Bayer của Camera Cáp (CSI)**: Khi bật chế độ `usb` trong `camera_config.json`, hệ thống sẽ tự động bỏ qua kiểm tra cổng Raw Bayer CSI giúp tránh khóa thiết bị `/dev/video0`.
+* **Tự động Fallback độ phân giải**: Tự động linh hoạt chuyển đổi giữa `1280x720` và `640x480` nếu camera USB không đáp ứng được cấu hình cao.
+
+### 2. Tích Hợp Ghi Âm Khoang Lái Bằng Micro Có Sẵn Trên USB Camera
+* Tự động phát hiện thiết bị thu âm tích hợp sẵn trên USB Camera (ALSA Sound Card `hw:2,0`).
+* Hỗ trợ ghi âm bằng chứng cabin khoang lái khi phát hiện báo động nguy hiểm (Level 2 / Level 3).
+
+### 3. Tự Động Phát Wi-Fi Hotspot Không Cần Màn Hình (Headless Auto-Hotspot)
+* Khởi chạy qua script [setup_autohotspot.sh](file:///home/kata/Documents/AI_DMS/setup_autohotspot.sh).
+* **Cơ chế thông minh**:
+  * **Tại nhà / Công ty**: Tự động kết nối mạng Wi-Fi đã lưu (Ưu tiên độ ưu tiên kết nối cao `Priority 10`).
+  * **Trên xe ô tô / Không có Wi-Fi quen**: Tự động ngắt và phát trạm Wi-Fi Hotspot **`AI_DMS_Hotspot`** (Mật khẩu: `1234567890`) trong vòng 3 giây.
+
+### 4. Trang Web Dashboard Local & Tên Miền Cố Định (`http://wifi.local`)
+* **Tên miền cố định tự động cập nhật IP (mDNS Dynamic Resolution)**:
+  Bất kể IP của Pi bị thay đổi thế nào (khi ở Hotspot `10.42.0.1` hay Wi-Fi nhà `192.168.1.x`), bạn luôn truy cập được Dashboard qua địa chỉ cố định:
+  👉 **`http://wifi.local`** *(hoặc `http://dms.local`)*
+* **Giao diện Web Dashboard Hiện Đại (Dark-Mode Glassmorphic)**:
+  * **Tab 1: Báo Cáo Chuyến Đi (Driving Sessions)**: Thống kê tổng số chuyến đi, thời gian lái xe, số lần vi phạm (Ngủ gật/Mất tập trung/Ngáp), điểm mệt mỏi (Fatigue Score). Đánh giá tự động trạng thái chuyến đi: 🟢 **An toàn** | 🟡 **Cảnh báo** | 🔴 **Nguy hiểm**. Hỗ trợ xuất file báo cáo CSV.
+  * **Tab 2: Quản Lý Wi-Fi (Wi-Fi Manager)**: Quét và chọn kết nối Wi-Fi 1-click trực tiếp từ điện thoại / laptop mà không cần gõ lệnh.
+
+---
+
+## 🛠️ Cấu Trúc Thư Mục Dự Án
 
 ```text
-├── drowsiness_detector.py # Chương trình nhận diện và chạy Dashboard chính
+AI_DMS/
+├── drowsiness_detector.py # Chương trình nhận diện AI & Dashboard chính
+├── wifi_dashboard.py      # Web Dashboard Portal & API Báo cáo Chuyến đi (Cổng 80)
+├── mdns_publisher.py      # Dịch vụ cập nhật tên miền cố định wifi.local
+├── setup_autohotspot.sh   # Script tự động cài đặt Auto-Hotspot NetworkManager
+├── camera_config.json     # Cấu hình Camera USB (1280x720 MJPG 30FPS)
 ├── lstm_model.py          # Kiến trúc mạng LSTM (PyTorch)
 ├── train_lstm.py          # Kịch bản huấn luyện mô hình LSTM
-├── lstm_drowsiness.pth    # Trọng số mô hình đã được huấn luyện sẵn
-├── run_dms.sh             # Script Bash tự động thiết lập môi trường và chạy ứng dụng
-├── install_remote.sh      # Script cài đặt AnyDesk trên Ubuntu
-├── requirements.txt       # Danh sách các thư viện Python cần thiết
-└── README.md              # Hướng dẫn sử dụng
+├── lstm_drowsiness.pth    # Trọng số mô hình đã huấn luyện
+├── view_history.py        # Công cụ CLI truy vấn lịch sử CSDL SQLite
+├── run_dms.sh             # Script khởi chạy ứng dụng chính
+├── install_remote.sh      # Script cài đặt AnyDesk quản lý từ xa
+├── requirements.txt       # Danh sách thư viện Python
+└── README.md              # Tài liệu hướng dẫn sử dụng
 ```
 
 ---
 
-## Hướng dẫn cài đặt và sử dụng trên Ubuntu / Linux
+## 🚀 Hướng Dẫn Cài Đặt & Khởi Chạy
 
-### 1. Chuẩn bị phần cứng và Camera
-- Đảm bảo camera USB Webcam hoặc CSI Camera đã được kết nối và hệ thống nhận diện thiết bị tại `/dev/video*`.
-- Bạn có thể kiểm tra danh sách thiết bị video bằng lệnh:
-  ```bash
-  ls -l /dev/video*
-  ```
-
-### 2. Khởi chạy nhanh bằng Script
-Dự án cung cấp sẵn tệp shell script tự động tạo môi trường ảo Python (`venv`), cài đặt các thư viện cần thiết và chạy ứng dụng:
+### 1. Khởi chạy Hệ thống Nhận diện AI DMS
 ```bash
-# Cấp quyền thực thi cho script (nếu chưa có)
+# Cấp quyền thực thi và chạy
 chmod +x run_dms.sh
-
-# Chạy chương trình
 ./run_dms.sh
 ```
 
-### 3. Cài đặt thủ công (Không dùng Script)
-Nếu muốn tự cài đặt từng bước:
+### 2. Cài đặt Auto Hotspot & Web Dashboard (`http://wifi.local`)
+Để bật tính năng tự động phát Wi-Fi khi lên xe và trang Web Dashboard cố định:
 ```bash
-# 1. Cập nhật hệ thống và cài đặt môi trường ảo
-sudo apt update
-sudo apt install -y python3-pip python3-venv
-
-# 2. Tạo và kích hoạt môi trường ảo
-python3 -m venv venv
-source venv/bin/activate
-
-# 3. Cài đặt các thư viện phụ thuộc
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# 4. Chạy chương trình
-python3 drowsiness_detector.py
+# Chạy script cài đặt Auto-Hotspot
+sudo ./setup_autohotspot.sh
 ```
 
-*(Nếu muốn tự huấn luyện lại mô hình LSTM từ đầu, hãy chạy: `python3 train_lstm.py`)*
-
-### 4. Các tham số cấu hình tùy chọn (Command-line Arguments)
-Bạn có thể tùy chọn truyền thêm các tham số khi chạy thông qua script `./run_dms.sh` hoặc trực tiếp qua lệnh `python3 drowsiness_detector.py`:
-- `--scale <giá_trị>`: Tỉ lệ kích thước cửa sổ hiển thị (mặc định là `1.0`). Ví dụ truyền `--scale 0.5` để thu nhỏ một nửa hoặc `--scale 0.7` để thu nhỏ còn 70%. Việc này giúp giao diện hiển thị gọn gàng hơn trên các màn hình nhỏ của Raspberry Pi và giúp hệ thống chạy nhẹ hơn.
-- `--camera <chỉ_số>`: Chỉ định chỉ số camera sử dụng (ví dụ: `--camera 0`).
-- `--enhance`: Bắt buộc kích hoạt chế độ tăng cường độ tương phản CLAHE.
-- `--no-enhance`: Vô hiệu hóa chế độ tự động tăng cường độ tương phản.
-- `--show-enhanced`: Hiển thị khung hình camera sau khi đã được tăng cường CLAHE lên dashboard.
-
-### 5. Thiết lập khởi động cùng hệ thống (Autostart)
-Để ứng dụng tự động kích hoạt sau khi khởi động desktop Ubuntu:
-1. Tạo một file cấu hình autostart tại đường dẫn `~/.config/autostart/ai_dms.desktop`.
-2. Ghi nội dung cấu hình trỏ đường dẫn thực thi tới file `run_dms.sh`.
+Sau khi cài xong, bạn có thể kết nối Wi-Fi **`AI_DMS_Hotspot`** (Pass: `1234567890`) và mở trình duyệt truy cập:
+👉 **`http://wifi.local`**
 
 ---
 
-## Hướng dẫn cấu hình và chạy trên Raspberry Pi
+## 📊 Quản Lý Lịch Sử Hành Trình (SQLite Database)
 
-### 1. Sơ đồ kết nối GPIO (Cảnh báo vật lý)
-- **Động cơ rung**: Kết nối cực điều khiển qua transistor tới chân **GPIO 17** (BCM 17 / Physical Pin 11).
-- **Còi chíp (Buzzer)**: Kết nối cực điều khiển qua transistor tới chân **GPIO 27** (BCM 27 / Physical Pin 13).
-
-*Lưu ý: Mặc định tính năng điều khiển GPIO sẽ tự động kích hoạt nếu thư viện `RPi.GPIO` được cài đặt thành công trên hệ thống.*
-
-### 2. Cấu hình Camera trên Raspberry Pi OS / Ubuntu
-Nếu bạn sử dụng **Raspberry Pi Camera Module 3** hoặc các dòng camera CSI:
-1. Thêm cấu hình cảm biến vào `/boot/firmware/config.txt` (ví dụ: `dtoverlay=imx708`).
-2. Khởi động lại thiết bị.
-3. Chạy chương trình thông qua công cụ hỗ trợ tương thích `libcamerify`:
-   ```bash
-   libcamerify python3 drowsiness_detector.py
-   ```
+Dữ liệu từng chuyến đi được tự động lưu vào cơ sở dữ liệu `dms_history.db`:
+* **Xem qua Web Dashboard**: Truy cập `http://wifi.local` ➜ Xem tab **Chuyến Đi**.
+* **Xuất báo cáo CSV**: Nhấp nút **Xuất File CSV** trên giao diện Web hoặc chạy lệnh CLI:
+  ```bash
+  python3 view_history.py --export
+  ```
 
 ---
 
-## Hướng dẫn kiểm thử (Testing & Calibration)
+## ⚙️ Sơ Đồ Kết Nối Phần Cứng (Raspberry Pi GPIO)
 
-1. **Hiệu chuẩn (Calibration)**: Khi ứng dụng bắt đầu mở camera, tài xế cần ngồi thẳng lưng, nhìn thẳng vào camera trong khoảng **3 giây đầu tiên (100 frames)** để hệ thống thiết lập baseline sinh học chuẩn (EAR, MAR, Head Pose gốc).
-2. **Hiệu chuẩn lại**: Nhấn phím **`r`** trên bàn phím bất cứ lúc nào nếu thay đổi tư thế ngồi hoặc vị trí camera.
-3. **Thoát chương trình**: Nhấn phím **`q`** tại màn hình hiển thị Dashboard của camera để giải phóng camera và đóng ứng dụng an toàn.
+* **Động cơ rung**: Kết nối chân **GPIO 17** (Pin 11).
+* **Còi báo động (Buzzer)**: Kết nối chân **GPIO 27** (Pin 13).
+* **Nút bấm Quét Lại (Re-calibrate Button)**: Chân **GPIO 22** (Pin 15) và **GND** (Pin 14).
+
+---
+
+## 📝 Giấy Phép & Đóng Góp
+
+Dự án được phát triển bởi **Trần Đạt** (trandat09062003). Tất cả các đóng góp và báo lỗi xin vui lòng gửi qua phần Issues trên GitHub.

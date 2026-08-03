@@ -1,0 +1,8 @@
+{
+    "ear_baseline": 0.3,
+    "mar_baseline": 0.2,
+    "pitch_baseline": 0.0,
+    "yaw_baseline": 0.0,
+    "roll_baseline": 0.0,
+    "ear_limit": 0.22
+}

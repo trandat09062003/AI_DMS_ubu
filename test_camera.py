@@ -36,25 +36,76 @@ def main():
         bayer_pattern = camera_config.get("bayer_pattern", "GB")
         camera_flip_code = camera_config.get("flip_code", None)
     
-    # Quét danh sách camera (Nếu truyền --camera sẽ chỉ quét camera đó, nếu không sẽ quét tự động từ 0-10)
-    camera_indices = [args.camera] if args.camera is not None else list(range(11))
+    if args.camera is not None:
+        camera_indices = [args.camera]
+    elif camera_config is not None and "camera_index" in camera_config:
+        pref_idx = camera_config["camera_index"]
+        valid_devs = [i for i in range(6) if os.path.exists(f"/dev/video{i}")]
+        if not valid_devs:
+            valid_devs = list(range(6))
+        camera_indices = [pref_idx] + [i for i in valid_devs if i != pref_idx]
+    else:
+        valid_devs = [i for i in range(6) if os.path.exists(f"/dev/video{i}")]
+        camera_indices = valid_devs if valid_devs else list(range(6))
     
+    is_usb_config = (camera_config.get("camera_type", "usb") == "usb") if camera_config else True
+    import time
+
     for camera_idx in camera_indices:
         try:
             print(f"Trying camera index {camera_idx}...")
-            temp_cap = cv2.VideoCapture(camera_idx)
+            temp_cap = cv2.VideoCapture(camera_idx, cv2.CAP_V4L2)
+            if not temp_cap.isOpened():
+                temp_cap = cv2.VideoCapture(camera_idx)
+
             if temp_cap.isOpened():
-                ret = False
                 try:
-                    ret, _ = temp_cap.read()
-                except:
+                    temp_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
                     pass
-                if ret:
-                    cap = temp_cap
-                    camera_idx_found = camera_idx
-                    print(f"Success opening camera index {camera_idx} in normal mode.")
+
+                fourcc_code = camera_config.get("fourcc", "MJPG") if camera_config else "MJPG"
+                req_w = camera_config.get("width", 1280) if camera_config else 1280
+                req_h = camera_config.get("height", 720) if camera_config else 720
+                req_fps = camera_config.get("fps", 30) if camera_config else 30
+
+                resolutions_to_try = [(req_w, req_h)]
+                if (req_w, req_h) != (1280, 720):
+                    resolutions_to_try.append((1280, 720))
+                if (req_w, req_h) != (640, 480):
+                    resolutions_to_try.append((640, 480))
+
+                ret = False
+                test_f = None
+
+                for try_w, try_h in resolutions_to_try:
+                    if fourcc_code:
+                        temp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc_code))
+                    temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, try_w)
+                    temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, try_h)
+                    if req_fps:
+                        temp_cap.set(cv2.CAP_PROP_FPS, req_fps)
+
+                    for attempt in range(8):
+                        try:
+                            ret, test_f = temp_cap.read()
+                        except Exception:
+                            ret = False
+                        if ret and test_f is not None and test_f.size > 0:
+                            break
+                        time.sleep(0.04)
+
+                    if ret and test_f is not None and test_f.size > 0:
+                        cap = temp_cap
+                        camera_idx_found = camera_idx
+                        h_res, w_res = test_f.shape[:2]
+                        print(f"Success opening camera index {camera_idx} in normal mode. Resolution: {w_res}x{h_res}")
+                        break
+
+                if cap is not None:
                     break
-                else:
+
+                if not is_usb_config:
                     print(f"Index {camera_idx} opened but could not read frame. Trying raw Bayer...")
                     temp_cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
                     
@@ -65,7 +116,7 @@ def main():
                     ret_bayer = False
                     try:
                         ret_bayer, frame_bayer = temp_cap.read()
-                    except:
+                    except Exception:
                         pass
                     if ret_bayer and frame_bayer is not None and frame_bayer.size == 614400:
                         cap = temp_cap
@@ -82,7 +133,7 @@ def main():
                     ret_bayer = False
                     try:
                         ret_bayer, frame_bayer = temp_cap.read()
-                    except:
+                    except Exception:
                         pass
                     if ret_bayer and frame_bayer is not None and frame_bayer.size == 384000:
                         cap = temp_cap
@@ -91,7 +142,8 @@ def main():
                         raw_bayer_format = 'pGAA'
                         print(f"Success opening camera index {camera_idx} in raw Bayer pGAA.")
                         break
-                    temp_cap.release()
+                
+                temp_cap.release()
             else:
                 temp_cap.release()
         except Exception as e:

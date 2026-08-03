@@ -17,6 +17,7 @@ except ImportError:
 # Cấu hình cổng vật lý trên Raspberry Pi (nếu chạy trên Ubuntu Pi)
 MOTOR_PIN = 17  # Chân GPIO 17 điều khiển động cơ rung
 BUZZER_PIN = 27 # Chân GPIO 27 điều khiển còi chíp vật lý
+BUTTON_PIN = 22 # Chân GPIO 22 (Chân vật lý 15) nối nút bấm quét lại (Push Button)
 
 import sqlite3
 from collections import deque
@@ -90,6 +91,42 @@ def sleep_and_check(duration):
         time.sleep(rem)
     return alarm_level == 0
 
+# Hỗ trợ phát âm thanh cảnh báo bíp trên PC/Linux (không cần GPIO)
+_beep_file = "/tmp/dms_beep.wav"
+def _init_beep_sound():
+    try:
+        import wave, struct, math
+        sample_rate = 44100
+        duration = 0.08
+        freq = 1000.0
+        n_samples = int(sample_rate * duration)
+        with wave.open(_beep_file, 'w') as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(sample_rate)
+            data = bytearray()
+            for i in range(n_samples):
+                t = i / sample_rate
+                sample = int(16000 * math.sin(2 * math.pi * freq * t))
+                data.extend(struct.pack('<h', sample))
+            f.writeframes(data)
+    except Exception:
+        pass
+
+_init_beep_sound()
+
+def play_pc_beep():
+    try:
+        import subprocess, shutil
+        if shutil.which("aplay"):
+            subprocess.Popen(["aplay", "-q", _beep_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif shutil.which("paplay"):
+            subprocess.Popen(["paplay", _beep_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            print('\a', end='', flush=True)
+    except Exception:
+        pass
+
 def alarm_worker():
     global alarm_level
     while True:
@@ -120,9 +157,19 @@ def alarm_worker():
                     if sleep_and_check(0.1): continue
             except:
                 time.sleep(0.05)
-        # 2. Chế độ PC thường (không có phần cứng còi chíp/rung)
+        # 2. Chế độ PC thường (phát âm thanh cảnh báo loa trên PC/Linux)
         else:
-            time.sleep(0.05)
+            if alarm_level == 0:
+                time.sleep(0.05)
+            elif alarm_level == 1:
+                play_pc_beep()
+                if sleep_and_check(0.9): continue
+            elif alarm_level == 2:
+                play_pc_beep()
+                if sleep_and_check(0.3): continue
+            elif alarm_level == 3:
+                play_pc_beep()
+                if sleep_and_check(0.1): continue
 
 threading.Thread(target=alarm_worker, daemon=True).start()
 
@@ -209,7 +256,7 @@ def draw_bar(img, label, val, max_val, x, y, w, h, color):
     cv2.rectangle(img, (x, y), (x + fill_w, y + h), color, -1)
 
 def set_camera_controls(exposure_val, gain_val):
-    """Thiết lập thông số phơi sáng và gain của camera qua v4l2-ctl (chuyên dụng cho Raspberry Pi CSI)"""
+    """Thiết lập thông số phơi sáng và gain tương thích với cả CSI Camera và USB UVC Webcams"""
     import subprocess
     import os
     dev_path = "/dev/v4l-subdev0"
@@ -218,15 +265,21 @@ def set_camera_controls(exposure_val, gain_val):
     if not os.path.exists(dev_path):
         return
     try:
-        subprocess.run([
-            "v4l2-ctl", "-d", dev_path,
-            "-c", "auto_exposure=1",
-            "-c", "gain_automatic=0",
-            "-c", f"exposure={exposure_val}",
-            "-c", f"analogue_gain={gain_val}"
-        ], capture_output=True)
+        info = subprocess.run(["v4l2-ctl", "-d", dev_path, "--info"], capture_output=True, text=True).stdout
+        if "uvcvideo" in info or "USB" in info:
+            # USB Webcams dùng chế độ tự động phơi sáng phần cứng
+            pass
+        else:
+            # Raspberry Pi CSI camera dùng điều khiển subdev
+            subprocess.run([
+                "v4l2-ctl", "-d", dev_path,
+                "-c", "auto_exposure=1",
+                "-c", "gain_automatic=0",
+                "-c", f"exposure={exposure_val}",
+                "-c", f"analogue_gain={gain_val}"
+            ], capture_output=True)
     except Exception as e:
-        print(f"[WARN] Khong the cau hinh camera controls: {e}")
+        pass
 
 # --- Luồng Ứng Dụng Chính ---
 
@@ -292,38 +345,90 @@ def main():
                 current_gain = new_gain
                 set_camera_controls(current_exposure, current_gain)
     
-    # Quét danh sách camera (Nếu truyền --camera sẽ chỉ quét camera đó, nếu không sẽ quét tự động từ 0-10)
-    camera_indices = [args.camera] if args.camera is not None else list(range(11))
+    # Quét danh sách camera (Ưu tiên camera_index trong camera_config.json nếu có, hoặc --camera)
+    if args.camera is not None:
+        camera_indices = [args.camera]
+    elif camera_config is not None and "camera_index" in camera_config:
+        pref_idx = camera_config["camera_index"]
+        valid_devs = [i for i in range(6) if os.path.exists(f"/dev/video{i}")]
+        if not valid_devs:
+            valid_devs = list(range(6))
+        camera_indices = [pref_idx] + [i for i in valid_devs if i != pref_idx]
+    else:
+        valid_devs = [i for i in range(6) if os.path.exists(f"/dev/video{i}")]
+        camera_indices = valid_devs if valid_devs else list(range(6))
     
+    is_usb_config = (camera_config.get("camera_type", "usb") == "usb") if camera_config else True
+
     for camera_idx in camera_indices:
         try:
             print(f"[INFO] Dang thu mo camera index {camera_idx}...")
-            temp_cap = cv2.VideoCapture(camera_idx)
+            temp_cap = cv2.VideoCapture(camera_idx, cv2.CAP_V4L2)
+            if not temp_cap.isOpened():
+                temp_cap = cv2.VideoCapture(camera_idx)
+
             if temp_cap.isOpened():
-                # Đọc thử 1 frame mặc định
-                ret = False
+                # Tối ưu hóa cho USB Camera: Buffer size = 1 triệt tiêu hoàn toàn độ trễ (lag)
                 try:
-                    ret, _ = temp_cap.read()
-                except:
+                    temp_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
                     pass
-                
-                if ret:
-                    cap = temp_cap
-                    print(f"[SUCCESS] Da mo camera index {camera_idx} thanh cong!")
+
+                # Cấu hình định dạng và độ phân giải camera
+                fourcc_code = camera_config.get("fourcc", "MJPG") if camera_config else "MJPG"
+                req_w = camera_config.get("width", 1280) if camera_config else 1280
+                req_h = camera_config.get("height", 720) if camera_config else 720
+                req_fps = camera_config.get("fps", 30) if camera_config else 30
+
+                resolutions_to_try = [(req_w, req_h)]
+                if (req_w, req_h) != (1280, 720):
+                    resolutions_to_try.append((1280, 720))
+                if (req_w, req_h) != (640, 480):
+                    resolutions_to_try.append((640, 480))
+
+                ret = False
+                test_frame = None
+
+                for try_w, try_h in resolutions_to_try:
+                    if fourcc_code:
+                        temp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc_code))
+                    temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, try_w)
+                    temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, try_h)
+                    if req_fps:
+                        temp_cap.set(cv2.CAP_PROP_FPS, req_fps)
+
+                    # Đọc thử kèm làm ấm (USB camera cần thời gian cho ISP khởi tạo)
+                    for attempt in range(8):
+                        try:
+                            ret, test_frame = temp_cap.read()
+                        except Exception:
+                            ret = False
+                        if ret and test_frame is not None and test_frame.size > 0:
+                            break
+                        time.sleep(0.04)
+
+                    if ret and test_frame is not None and test_frame.size > 0:
+                        cap = temp_cap
+                        h_res, w_res = test_frame.shape[:2]
+                        print(f"[SUCCESS] Da mo camera USB/V4L2 index {camera_idx} thanh cong! Do phan gia hoat dong: {w_res}x{h_res}")
+                        break
+
+                if cap is not None:
                     break
-                else:
-                    # Thử chế độ Raw Bayer (dành cho CSI Camera trên Pi không có libcamerify)
-                    print(f"[INFO] Mac dinh camera index {camera_idx} khong doc duoc frame. Dang thu cau hinh che do Raw Bayer...")
+
+                # Nếu không đọc được frame thường và KHÔNG PHẢI chế độ USB camera bắt buộc mới thử Raw Bayer
+                if not is_usb_config:
+                    print(f"[INFO] Camera index {camera_idx} khong doc duoc frame thuong. Dang thu che do Raw Bayer (CSI Cable)...")
                     temp_cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
                     
-                    # Thử định dạng GB10 (10-bit Bayer không nén, 614400 bytes cho 640x480)
+                    # Thử GB10
                     temp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('G', 'B', '1', '0'))
                     temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                     temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                     ret_bayer = False
                     try:
                         ret_bayer, frame_bayer = temp_cap.read()
-                    except:
+                    except Exception:
                         pass
                         
                     if ret_bayer and frame_bayer is not None and frame_bayer.size == 614400:
@@ -333,14 +438,14 @@ def main():
                         print(f"[SUCCESS] Da mo camera index {camera_idx} o che do Raw Bayer GB10!")
                         break
                     
-                    # Thử định dạng pGAA (10-bit Bayer nén MIPI, 384000 bytes cho 640x480)
+                    # Thử pGAA
                     temp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('p', 'G', 'A', 'A'))
                     temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                     temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                     ret_bayer = False
                     try:
                         ret_bayer, frame_bayer = temp_cap.read()
-                    except:
+                    except Exception:
                         pass
                         
                     if ret_bayer and frame_bayer is not None and frame_bayer.size == 384000:
@@ -349,9 +454,8 @@ def main():
                         raw_bayer_format = 'pGAA'
                         print(f"[SUCCESS] Da mo camera index {camera_idx} o che do Raw Bayer pGAA!")
                         break
-                    
-                    # Nếu thất bại hoàn toàn, giải phóng camera
-                    temp_cap.release()
+                
+                temp_cap.release()
             else:
                 temp_cap.release()
         except Exception as e:
@@ -430,6 +534,19 @@ def main():
             risk REAL
         )
     """)
+    db_cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dms_sessions (
+            session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_time TEXT,
+            end_time TEXT,
+            duration_seconds INTEGER,
+            distraction_count INTEGER,
+            drowsiness_count INTEGER,
+            yawn_count INTEGER,
+            avg_fatigue_score REAL,
+            max_fatigue_score REAL
+        )
+    """)
     db_conn.commit()
     print(f"[INFO] Da khoi tao co so du lieu SQLite tai: {db_path}")
 
@@ -439,9 +556,10 @@ def main():
             GPIO.setmode(GPIO.BCM)
             GPIO.setup(MOTOR_PIN, GPIO.OUT)
             GPIO.setup(BUZZER_PIN, GPIO.OUT)
+            GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             GPIO.output(MOTOR_PIN, GPIO.LOW)
             GPIO.output(BUZZER_PIN, GPIO.LOW)
-            print("[INFO] Da khoi tao GPIO Raspberry Pi thanh cong.")
+            print("[INFO] Da khoi tao GPIO Raspberry Pi (Motor: 17, Buzzer: 27, Button: 22) thanh cong.")
         except Exception as e:
             GPIO_AVAILABLE = False
             print(f"[WARN] Khong the khoi tao GPIO: {e}")
@@ -484,6 +602,48 @@ def main():
     eye_closed_start_time = None
     head_tilted_start_time = None
     
+    # Thông tin tiến trình hành trình lái xe (Driving Session Tracking)
+    current_session_id = None
+    session_start_time = None
+    session_start_str = ""
+    session_distraction_count = 0
+    session_drowsiness_count = 0
+    session_yawn_count = 0
+    fatigue_scores_history = []
+    
+    # Cờ kiểm soát sự kiện liên tục
+    eye_closed_3s_logged = False
+    distraction_logged = False
+    last_db_save_time = time.time()
+
+    def save_session_to_db():
+        nonlocal current_session_id, session_start_time, session_start_str
+        nonlocal session_distraction_count, session_drowsiness_count, session_yawn_count, fatigue_scores_history
+        if session_start_time is None:
+            return
+        current_time_val = time.time()
+        end_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(current_time_val))
+        duration_sec = int(current_time_val - session_start_time)
+        avg_fatigue = float(np.mean(fatigue_scores_history)) if fatigue_scores_history else 0.0
+        max_fatigue = float(np.max(fatigue_scores_history)) if fatigue_scores_history else 0.0
+        
+        try:
+            if current_session_id is None:
+                db_cursor.execute("""
+                    INSERT INTO dms_sessions (start_time, end_time, duration_seconds, distraction_count, drowsiness_count, yawn_count, avg_fatigue_score, max_fatigue_score)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (session_start_str, end_time_str, duration_sec, session_distraction_count, session_drowsiness_count, session_yawn_count, avg_fatigue, max_fatigue))
+                current_session_id = db_cursor.lastrowid
+            else:
+                db_cursor.execute("""
+                    UPDATE dms_sessions
+                    SET end_time = ?, duration_seconds = ?, distraction_count = ?, drowsiness_count = ?, yawn_count = ?, avg_fatigue_score = ?, max_fatigue_score = ?
+                    WHERE session_id = ?
+                """, (end_time_str, duration_sec, session_distraction_count, session_drowsiness_count, session_yawn_count, avg_fatigue, max_fatigue, current_session_id))
+            db_conn.commit()
+        except Exception as e:
+            print(f"[WARN] Khong the luu tien trinh vao DB: {e}")
+
     calibrated = False
     
     last_second_time = time.time()
@@ -493,12 +653,38 @@ def main():
     blink_rate = 0
     yawn_count = 0
     
+    recalibrate_requested = False
+
     # Tạo giao diện hiển thị (Su dung WINDOW_NORMAL de cho phep keo gian thu nho)
     cv2.namedWindow("DMS - Drowsiness Detection Dashboard", cv2.WINDOW_NORMAL)
+    
+    def on_mouse_click(event, x, y, flags, param):
+        nonlocal recalibrate_requested
+        if event == cv2.EVENT_LBUTTONDOWN:
+            scale = args.scale if (args.scale != 1.0 and args.scale > 0) else 1.0
+            real_x = x / scale
+            real_y = y / scale
+            
+            # w mặc định là 640 nếu chưa đọc frame
+            current_w = w if 'w' in locals() else 640
+            
+            # Kiểm tra nếu click vào vùng nút bấm [ RE-CALIBRATE / QUET LAI ]
+            if (current_w + 15) <= real_x <= (current_w + 305) and 425 <= real_y <= 460:
+                recalibrate_requested = True
+
+    cv2.setMouseCallback("DMS - Drowsiness Detection Dashboard", on_mouse_click)
     
     sim_time_start = time.time()
     
     while True:
+        # Kiểm tra nút bấm vật lý trên Raspberry Pi GPIO (Chân 22 / Pin 15)
+        if GPIO_AVAILABLE:
+            try:
+                if GPIO.input(BUTTON_PIN) == GPIO.LOW:
+                    recalibrate_requested = True
+            except:
+                pass
+
         # 1. Đọc frame (từ camera thật hoặc tạo dữ liệu giả lập)
         if not simulated_mode:
             if raw_bayer_mode:
@@ -757,8 +943,17 @@ def main():
                 ear_limit = max(0.20, min(0.24, ear_baseline * 0.80))
                 calibrated = True
                 alarm_level = 0  # Tắt còi khi hiệu chuẩn hoàn tất
+                # Bắt đầu phiên hành trình lái xe (Driving session)
+                session_start_time = time.time()
+                session_start_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(session_start_time))
+                session_distraction_count = 0
+                session_drowsiness_count = 0
+                session_yawn_count = 0
+                fatigue_scores_history.clear()
+                current_session_id = None
+                save_session_to_db()
                 print("====================================================")
-                print("[SUCCESS] Hieu chuan hoan tat!")
+                print("[SUCCESS] Hieu chuan hoan tat! Da khoi tao phien luu tien trinh luu hanh trinh.")
                 print(f"EAR Baseline: {ear_baseline:.3f} | Nguong nham mat (EAR Limit): {ear_limit:.3f}")
                 print(f"MAR Baseline: {mar_baseline:.3f}")
                 print(f"Pitch Baseline: {pitch_baseline:.3f} | Yaw Baseline: {yaw_baseline:.3f} | Roll Baseline: {roll_baseline:.3f}")
@@ -778,6 +973,7 @@ def main():
             else:
                 eye_closed_start_time = None
                 eye_closed_duration = 0.0
+                eye_closed_3s_logged = False
                 
             if is_eye_closed and not eye_previously_closed:
                 # Bắt đầu nhắm mắt
@@ -795,6 +991,7 @@ def main():
             elif not is_yawning and mouth_previously_yawning:
                 if yawn_start_time and (time.time() - yawn_start_time) >= 1.5:
                     yawn_timestamps.append(time.time())
+                    session_yawn_count += 1
                 mouth_previously_yawning = False
                 yawn_start_time = None
             
@@ -901,6 +1098,8 @@ def main():
                     # Xóa bộ đệm giây cũ
                     frame_buffer.clear()
             
+            fatigue_scores_history.append(fatigue_score)
+            
             # --- Phân Loại & Kích Hoạt Cảnh Báo Đa Tầng ---
             if fatigue_score < 0.4:
                 status_text = "TINH TAO"
@@ -919,17 +1118,34 @@ def main():
                 status_color = (0, 0, 255)  # Red
                 alarm_level = 3
                 
-            # Đè cảnh báo khẩn cấp tức thì (Overrides)
-            if eye_closed_duration >= 1.0:
-                status_text = "NGUY HIEM - NHAM MAT!"
+            # Đè cảnh báo khẩn cấp tức thì (Overrides & Đếm sự kiện hành trình)
+            if eye_closed_duration >= 3.0:
+                status_text = "NGUY HIEM - NHAM MAT 3S!"
                 status_color = (0, 0, 255)  # Red
                 alarm_level = 3
-                fatigue_score = 0.95
-            elif head_tilted_duration >= 1.0:
+                fatigue_score = 1.0
+                if not eye_closed_3s_logged:
+                    session_drowsiness_count += 1
+                    eye_closed_3s_logged = True
+            elif eye_closed_duration >= 1.0:
+                status_text = "CANH BAO - NHAM MAT!"
+                status_color = (0, 165, 255)  # Orange
+                alarm_level = 2
+                fatigue_score = max(fatigue_score, 0.85)
+                
+            if head_tilted_duration >= 1.0:
                 status_text = "NGUY HIEM - LECH DAU!"
                 status_color = (0, 0, 255)  # Red
                 alarm_level = 3
-                fatigue_score = 0.95
+                fatigue_score = max(fatigue_score, 0.95)
+                
+            # Theo dõi đếm sự kiện mất tập trung khi lệch đầu
+            if head_tilted_duration >= 1.5:
+                if not distraction_logged:
+                    session_distraction_count += 1
+                    distraction_logged = True
+            elif not is_head_tilted and detected_face:
+                distraction_logged = False
 
             # Nếu người lái xe trở lại trạng thái bình thường (mắt mở, đầu thẳng, không ngáp)
             # thì bắt buộc dừng còi báo ngay lập tức.
@@ -937,6 +1153,11 @@ def main():
                 alarm_level = 0
                 status_text = "TINH TAO"
                 status_color = (0, 255, 0)
+                
+            # Cập nhật thông tin hành trình vào cơ sở dữ liệu định kỳ mỗi 5 giây
+            if current_time - last_db_save_time >= 5.0:
+                last_db_save_time = current_time
+                save_session_to_db()
                 
             # Đèn báo viền đỏ nhấp nháy trên màn hình camera nếu mệt mỏi nặng
             if alarm_level >= 2:
@@ -956,12 +1177,17 @@ def main():
                 
             elapsed_lost = time.time() - face_lost_start_time
             if elapsed_lost >= 1.5:
-                # Đã mất dấu lâu hơn 1.5 giây -> Cảnh báo khẩn cấp ngay lập tức
+                # Đã mất dấu lâu hơn 1.5 giây -> Cảnh báo khẩn cấp ngay lập tức & Đếm 1 lần mất tập trung
                 status_text = "NGUY HIEM - MAT DAU!"
                 status_color = (0, 0, 255)
                 alarm_level = 3 # Fast beep bíp dồn dập
                 fatigue_score = 1.0 # Force full score trên UI
                 lstm_risk = 100.0
+                fatigue_scores_history.append(fatigue_score)
+                
+                if not distraction_logged:
+                    session_distraction_count += 1
+                    distraction_logged = True
                 
                 # Vẽ viền đỏ nhấp nháy khẩn cấp
                 border_color = (0, 0, 255) if int(time.time() * 5) % 2 == 0 else (0, 0, 0)
@@ -986,24 +1212,43 @@ def main():
 
         # --- Vẽ Dashboard Thống Kê Giao Diện Đẹp ---
         if calibrated:
-            # Tiêu đề chính
-            cv2.putText(dashboard, "DRIVER MONITORING SYSTEM", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.line(dashboard, (15, 45), (300, 45), (100, 100, 100), 1)
+            # 1. Tiêu đề chính
+            cv2.putText(dashboard, "DRIVER MONITORING SYSTEM", (20, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.line(dashboard, (15, 30), (305, 30), (100, 100, 100), 1)
             
-            # Vẽ các thanh tiến trình cho metrics
-            draw_bar(dashboard, "EAR (Eye Opening)", ear, 0.35, 20, 80, 280, 15, (255, 255, 0))
-            draw_bar(dashboard, "MAR (Mouth Opening)", mar, 0.8, 20, 130, 280, 15, (255, 0, 255))
+            # 2. Tiến trình hành trình lái xe (Driving Session Info)
+            if session_start_time is not None:
+                elapsed_sec = int(time.time() - session_start_time)
+                hrs = elapsed_sec // 3600
+                mins = (elapsed_sec % 3600) // 60
+                secs = elapsed_sec % 60
+                time_str = f"{hrs:02d}:{mins:02d}:{secs:02d}"
+            else:
+                time_str = "00:00:00"
+                
+            cv2.putText(dashboard, "TIEN TRINH LAI XE (SESSION):", (20, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1, cv2.LINE_AA)
+            cv2.putText(dashboard, f" Thoi gian: {time_str}", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1, cv2.LINE_AA)
             
-            # Góc đầu
-            cv2.putText(dashboard, f"Head Pose angles (deg):", (20, 175), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+            dis_color = (0, 0, 255) if session_distraction_count > 0 else (0, 255, 0)
+            drow_color = (0, 0, 255) if session_drowsiness_count > 0 else (0, 255, 0)
+            cv2.putText(dashboard, f" Mat tap trung: {session_distraction_count} lan", (20, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.43, dis_color, 1, cv2.LINE_AA)
+            cv2.putText(dashboard, f" Ngu ngan / Ngap: {session_drowsiness_count} / {session_yawn_count} lan", (20, 99), cv2.FONT_HERSHEY_SIMPLEX, 0.43, drow_color, 1, cv2.LINE_AA)
+            cv2.line(dashboard, (15, 108), (305, 108), (100, 100, 100), 1)
+            
+            # 3. Chỉ số mốc mắt & miệng
+            draw_bar(dashboard, "EAR (Eye Opening)", ear, 0.35, 20, 126, 280, 12, (255, 255, 0))
+            draw_bar(dashboard, "MAR (Mouth Opening)", mar, 0.8, 20, 158, 280, 12, (255, 0, 255))
+            
+            # 4. Góc đầu
+            cv2.putText(dashboard, "Head Pose angles (deg):", (20, 185), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (200, 200, 200), 1, cv2.LINE_AA)
             pitch_dev_disp = abs((pitch - pitch_baseline + 180) % 360 - 180)
             yaw_dev_disp = abs((yaw - yaw_baseline + 180) % 360 - 180)
             roll_dev_disp = abs((roll - roll_baseline + 180) % 360 - 180)
-            cv2.putText(dashboard, f"  Pitch (Cui): {pitch:.1f}", (20, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0) if pitch_dev_disp < 25.0 else (0, 0, 255), 1)
-            cv2.putText(dashboard, f"  Yaw (Quay): {yaw:.1f}", (20, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0) if yaw_dev_disp < 30.0 else (0, 0, 255), 1)
-            cv2.putText(dashboard, f"  Roll (Nghieng): {roll:.1f}", (20, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0) if roll_dev_disp < 25.0 else (0, 0, 255), 1)
+            cv2.putText(dashboard, f" Pitch: {pitch:.1f}", (20, 201), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0) if pitch_dev_disp < 25.0 else (0, 0, 255), 1)
+            cv2.putText(dashboard, f" Yaw: {yaw:.1f}", (115, 201), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0) if yaw_dev_disp < 30.0 else (0, 0, 255), 1)
+            cv2.putText(dashboard, f" Roll: {roll:.1f}", (205, 201), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0) if roll_dev_disp < 25.0 else (0, 0, 255), 1)
             
-            # PERCLOS & Blinks
+            # 5. PERCLOS & Blinks
             try:
                 perclos_val = perclos
             except NameError:
@@ -1017,20 +1262,20 @@ def main():
             except NameError:
                 yc_val = 0
                 
-            draw_bar(dashboard, "PERCLOS (Eye Closed %)", perclos_val, 50.0, 20, 275, 280, 15, (0, 120, 255))
-            cv2.putText(dashboard, f"Blink Rate: {br_val} / min", (20, 315), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-            cv2.putText(dashboard, f"Yawn Count: {yc_val} / min", (20, 335), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+            draw_bar(dashboard, "PERCLOS (Eye Closed %)", perclos_val, 50.0, 20, 226, 280, 12, (0, 120, 255))
+            cv2.putText(dashboard, f"Blink: {br_val}/min | Yawn: {yc_val}/min", (20, 254), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
+            cv2.line(dashboard, (15, 264), (305, 264), (100, 100, 100), 1)
             
-            # Fatigue Score & LSTM Prediction
-            cv2.line(dashboard, (15, 355), (300, 355), (100, 100, 100), 1)
-            draw_bar(dashboard, "FATIGUE SCORE (FS)", fatigue_score, 1.0, 20, 385, 280, 18, status_color)
+            # 6. Fatigue Score & Status Box
+            draw_bar(dashboard, "FATIGUE SCORE (FS)", fatigue_score, 1.0, 20, 282, 280, 15, status_color)
             
-            # Khung hiển thị Trạng thái Cảnh báo
-            cv2.rectangle(dashboard, (20, 420), (300, 465), status_color, 2)
-            cv2.putText(dashboard, status_text, (35, 448), cv2.FONT_HERSHEY_SIMPLEX, 0.55, status_color, 2, cv2.LINE_AA)
+            cv2.rectangle(dashboard, (15, 312), (305, 355), status_color, 2)
+            cv2.putText(dashboard, status_text, (25, 338), cv2.FONT_HERSHEY_SIMPLEX, 0.50, status_color, 2, cv2.LINE_AA)
             
-            # LSTM prediction risk
-            # Chỉ hiển thị % khi đã tích lũy đủ 60 giây dữ liệu
+            # 7. SQLite Session log status & LSTM Prediction
+            if current_session_id is not None:
+                cv2.putText(dashboard, f"SQLite Logged (Session #{current_session_id})", (20, 368), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1, cv2.LINE_AA)
+            
             if model_loaded:
                 seq_len_current = len(history_window)
                 if seq_len_current < 60:
@@ -1041,8 +1286,14 @@ def main():
                     lstm_color = (0, 0, 255) if lstm_risk > 70 else (0, 255, 0)
                 cv2.putText(frame, lstm_text, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, lstm_color, 2, cv2.LINE_AA)
             
-            # Vẽ hướng dẫn phím tắt hiệu chuẩn lại
-            cv2.putText(dashboard, "Nhan 'r' de hieu chuan lai", (20, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1, cv2.LINE_AA)
+            # 8. Nút bấm Hiệu chuẩn lại (Interactive UI Button)
+            btn_bg = (255, 140, 0) if not recalibrate_requested else (0, 255, 255)
+            cv2.rectangle(dashboard, (15, 422), (305, 458), btn_bg, -1)
+            cv2.rectangle(dashboard, (15, 422), (305, 458), (255, 255, 255), 1)
+            cv2.putText(dashboard, "[ RE-CALIBRATE / QUET LAI ]", (28, 444), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2, cv2.LINE_AA)
+            
+            # Hướng dẫn phím bấm
+            cv2.putText(dashboard, "Click nut tren hoac nhan 'r' de quet lai", (15, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (140, 140, 140), 1, cv2.LINE_AA)
             
         # 6. Ghép khung hình camera với Dashboard thống kê
         combined_img = np.hstack((frame, dashboard))
@@ -1055,11 +1306,14 @@ def main():
         # Hiển thị giao diện chính
         cv2.imshow("DMS - Drowsiness Detection Dashboard", combined_img)
         
-        # Nhận phím bấm từ người dùng (q để thoát, r để hiệu chuẩn lại)
+        # Nhận phím bấm từ người dùng (q để thoát, r hoặc click nút để hiệu chuẩn lại)
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
-        elif key == ord('r'):
+        elif key == ord('r') or recalibrate_requested:
+            recalibrate_requested = False
+            if current_session_id is not None:
+                save_session_to_db()
             calibrated = False
             calib_count = 0
             calib_ears.clear()
@@ -1068,7 +1322,31 @@ def main():
             calib_yaws.clear()
             calib_rolls.clear()
             alarm_level = 0  # Reset còi ngay lập tức khi nhấn phím 'r'
-            print("[INFO] Yeu cau hieu chuan lai baseline...")
+            current_session_id = None
+            session_start_time = None
+            print("[INFO] Click nut bam / Nhan 'r': Yeu cau hieu chuan lai baseline va reset tien trinh hanh trinh...")
+
+    # Lưu và in báo cáo kết thúc hành trình
+    if current_session_id is not None or session_start_time is not None:
+        save_session_to_db()
+        print("====================================================")
+        print("[SESSION REPORT] THONG KE TIEN TRINH HÀNH TRÌNH LAI XE:")
+        if current_session_id:
+            print(f"- Ma phien (Session ID)  : #{current_session_id}")
+        print(f"- Thoi gian bat dau      : {session_start_str}")
+        if session_start_time:
+            elapsed_sec = int(time.time() - session_start_time)
+            hrs = elapsed_sec // 3600
+            mins = (elapsed_sec % 3600) // 60
+            secs = elapsed_sec % 60
+            print(f"- Tong thoi gian di      : {hrs:02d}:{mins:02d}:{secs:02d} ({elapsed_sec} giây)")
+        print(f"- So lan mat tap trung   : {session_distraction_count} lan")
+        print(f"- So lan ngu ngan (3s)   : {session_drowsiness_count} lan")
+        print(f"- So lan ngap            : {session_yawn_count} lan")
+        if fatigue_scores_history:
+            print(f"- Diem met moi trung binh: {np.mean(fatigue_scores_history):.2f}")
+            print(f"- Diem met moi cao nhat  : {np.max(fatigue_scores_history):.2f}")
+        print("====================================================")
 
     # Giải phóng tài nguyên
     if cap is not None:

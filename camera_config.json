@@ -1,0 +1,10 @@
+{
+    "camera_type": "usb",
+    "camera_index": 0,
+    "width": 1280,
+    "height": 720,
+    "fps": 30,
+    "fourcc": "MJPG",
+    "bayer_pattern": "GB",
+    "flip_code": 1
+}
