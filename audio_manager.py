@@ -14,10 +14,19 @@ def ensure_audio_dir():
     except Exception:
         pass
 
+def unmute_and_boost_mic():
+    """Tự động bật công tắc Micro và tăng âm lượng lên 100% (+24dB) trong ALSA Mixer"""
+    try:
+        subprocess.run(["amixer", "-c", "2", "sset", "Mic", "100%", "cap", "unmute"], capture_output=True)
+        subprocess.run(["amixer", "sset", "Capture", "100%", "cap", "unmute"], capture_output=True)
+    except Exception:
+        pass
+
 def find_usb_audio_device():
     """
     Tự động tìm kiếm chỉ số ALSA Card của USB Camera
     """
+    unmute_and_boost_mic()
     try:
         res = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
         for line in res.stdout.split("\n"):
@@ -73,6 +82,7 @@ def record_event_audio(event_name="session_end", duration_sec=10):
     """
     ensure_audio_dir()
     cleanup_old_audio()
+    unmute_and_boost_mic()
     
     device_name = find_usb_audio_device()
     timestamp = time.strftime("%Y%m%d_%H%M%S")
