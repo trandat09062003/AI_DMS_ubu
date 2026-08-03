@@ -9,6 +9,26 @@ AUDIO_DIR = "/home/kata/Documents/AI_DMS/audio_logs"
 def ensure_audio_dir():
     if not os.path.exists(AUDIO_DIR):
         os.makedirs(AUDIO_DIR, exist_ok=True)
+    try:
+        os.chmod(AUDIO_DIR, 0o777)
+    except Exception:
+        pass
+
+def find_usb_audio_device():
+    """
+    Tự động tìm kiếm chỉ số ALSA Card của USB Camera
+    """
+    try:
+        res = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
+        for line in res.stdout.split("\n"):
+            if "card " in line and ("Camera" in line or "USB" in line):
+                # Ví dụ: card 2: Camera [USB Camera], device 0: USB Audio
+                parts = line.split(":")
+                card_num = parts[0].replace("card", "").strip()
+                return f"hw:{card_num},0"
+    except Exception:
+        pass
+    return "hw:2,0"
 
 def cleanup_old_audio(max_size_mb=1000, max_days=3):
     """
@@ -33,7 +53,7 @@ def cleanup_old_audio(max_size_mb=1000, max_days=3):
 
         # 2. Xóa theo tổng dung lượng
         files = glob.glob(os.path.join(AUDIO_DIR, "*.wav")) + glob.glob(os.path.join(AUDIO_DIR, "*.mp3"))
-        files.sort(key=lambda x: os.path.getmtime(x)) # Cũ nhất xếp trước
+        files.sort(key=lambda x: os.path.getmtime(x))
         
         total_bytes = sum(os.path.getsize(f) for f in files)
         max_bytes = max_size_mb * 1024 * 1024
@@ -52,19 +72,19 @@ def cleanup_old_audio(max_size_mb=1000, max_days=3):
 
 def record_event_audio(event_name="drowsiness", duration_sec=10):
     """
-    Ghi âm một đoạn sự cố (ví dụ 10s) khi phát hiện cảnh báo và tự động nén.
+    Ghi âm một đoạn sự cố khoang lái (ví dụ 10s) từ Micro USB Camera và tự động lưu vào audio_logs/
     """
     ensure_audio_dir()
-    # Chạy dọn dẹp bộ nhớ trước
     cleanup_old_audio()
     
+    device_name = find_usb_audio_device()
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     filename = f"{timestamp}_{event_name}_{duration_sec}s.wav"
     filepath = os.path.join(AUDIO_DIR, filename)
     
     cmd = [
         "arecord",
-        "-D", "plughw:2,0",
+        "-D", device_name,
         "-f", "S16_LE",
         "-r", "48000",
         "-c", "1",
@@ -75,6 +95,8 @@ def record_event_audio(event_name="drowsiness", duration_sec=10):
     def run_record():
         try:
             subprocess.run(cmd, capture_output=True, timeout=duration_sec + 5)
+            if os.path.exists(filepath):
+                os.chmod(filepath, 0o666)
             print(f"[AUDIO] Da ghi am xong su co khoang lai: {filepath}")
         except Exception as e:
             print(f"[AUDIO ERROR] Ghi am loi: {e}")
