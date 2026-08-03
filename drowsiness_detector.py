@@ -1127,9 +1127,15 @@ def main():
                 if not eye_closed_3s_logged:
                     session_drowsiness_count += 1
                     eye_closed_3s_logged = True
+                    aud_file = None
                     try:
                         from audio_manager import record_event_audio
-                        record_event_audio("drowsiness_3s", 10)
+                        aud_file = record_event_audio("drowsiness_3s", 10)
+                    except Exception:
+                        pass
+                    try:
+                        from telegram_bot import send_telegram_alert_async
+                        send_telegram_alert_async("CẢNH BÁO NGUY HIỂM: Tài xế nhắm mắt liên tục 3s (Microsleep)!", frame)
                     except Exception:
                         pass
             elif eye_closed_duration >= 1.0:

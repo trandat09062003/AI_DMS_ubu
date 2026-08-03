@@ -6,6 +6,7 @@ import sqlite3
 import glob
 from flask import Flask, render_template_string, request, jsonify, Response, send_from_directory
 from audio_manager import cleanup_old_audio, AUDIO_DIR, ensure_audio_dir, record_event_audio
+from telegram_bot import load_telegram_config, save_telegram_config, send_telegram_alert_async
 
 app = Flask(__name__)
 DB_PATH = "/home/kata/Documents/AI_DMS/dms_history.db"
@@ -48,7 +49,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI DMS - Local Control & Event Audio Dashboard</title>
+    <title>AI DMS - Local Control & Telegram Alert Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * {
@@ -120,6 +121,7 @@ HTML_TEMPLATE = """
             border-radius: 14px;
             border: 1px solid rgba(255, 255, 255, 0.05);
             gap: 4px;
+            flex-wrap: wrap;
         }
 
         .tab-btn {
@@ -227,8 +229,7 @@ HTML_TEMPLATE = """
         .btn-action:hover { background: #6366f1; color: #ffffff; }
 
         audio {
-            height: 36px;
-            outline: none;
+            height: 36px; outline: none;
             filter: invert(0.9) hue-rotate(180deg);
             border-radius: 8px;
         }
@@ -269,12 +270,13 @@ HTML_TEMPLATE = """
                 <div class="logo-icon">🚘</div>
                 <div>
                     <div class="brand-title">AI DMS Dashboard</div>
-                    <div class="brand-desc">Giám sát Lái xe & Ghi Âm Âm Thanh Khoang Lái</div>
+                    <div class="brand-desc">Giám sát Lái xe, Cảnh báo Telegram & Ghi Âm Cabin</div>
                 </div>
             </div>
             <nav class="nav-tabs">
                 <button class="tab-btn active" onclick="switchTab('sessions')">📊 Chuyến Đi</button>
                 <button class="tab-btn" onclick="switchTab('audio')">🎵 Ghi Âm Cabin</button>
+                <button class="tab-btn" onclick="switchTab('telegram')">✈️ Telegram Bot</button>
                 <button class="tab-btn" onclick="switchTab('wifi')">📡 Wi-Fi Manager</button>
             </nav>
         </header>
@@ -340,7 +342,7 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- TAB 2: GHI ÂM CABIN KHOANG LÁI (EVENT-BASED & TEST) -->
+        <!-- TAB 2: GHI ÂM CABIN KHOANG LÁI -->
         <div id="tab-audio" class="tab-content">
             <div class="glass-panel">
                 <div class="panel-header">
@@ -373,7 +375,34 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- TAB 3: QUẢN LÝ WI-FI -->
+        <!-- TAB 3: TELEGRAM BOT NOTIFICATIONS -->
+        <div id="tab-telegram" class="tab-content">
+            <div class="glass-panel">
+                <div class="panel-header">
+                    <div class="panel-title">✈️ Cấu Hình Thông Báo Cảnh Báo Telegram Bot</div>
+                    <button class="btn-action" onclick="sendTestTelegram()" id="btn-test-tg">🧪 Gửi Cảnh Báo Thử</button>
+                </div>
+                <div style="font-size:0.85rem; color:#94a3b8; margin-bottom:20px;">
+                    Nhập <b>Bot Token</b> và <b>Chat ID</b> Telegram của bạn để hệ thống tự động gửi ảnh chụp camera và cảnh báo khi tài xế ngủ gật!
+                </div>
+
+                <div class="input-group">
+                    <label for="tg-token">Telegram Bot Token:</label>
+                    <input type="text" id="tg-token" placeholder="Ví dụ: 123456789:ABCdefGhIJKlmNoPQrsTUVwxyZ...">
+                </div>
+
+                <div class="input-group">
+                    <label for="tg-chatid">Telegram Chat ID (ID người nhận):</label>
+                    <input type="text" id="tg-chatid" placeholder="Ví dụ: 987654321">
+                </div>
+
+                <div style="display:flex; justify-content:flex-end;">
+                    <button class="btn-action" onclick="saveTelegramSettings()">💾 Lưu Cấu Hình Telegram</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 4: QUẢN LÝ WI-FI -->
         <div id="tab-wifi" class="tab-content">
             <div class="glass-panel">
                 <div class="panel-header">
@@ -415,8 +444,12 @@ HTML_TEMPLATE = """
                 document.querySelectorAll('.tab-btn')[1].classList.add('active');
                 document.getElementById('tab-audio').classList.add('active');
                 loadAudioFiles();
-            } else {
+            } else if (tabName === 'telegram') {
                 document.querySelectorAll('.tab-btn')[2].classList.add('active');
+                document.getElementById('tab-telegram').classList.add('active');
+                loadTelegramConfig();
+            } else {
+                document.querySelectorAll('.tab-btn')[3].classList.add('active');
                 document.getElementById('tab-wifi').classList.add('active');
                 scanWifi();
             }
@@ -519,6 +552,42 @@ HTML_TEMPLATE = """
                 });
         }
 
+        function loadTelegramConfig() {
+            fetch('/api/telegram_config')
+                .then(r => r.json())
+                .then(cfg => {
+                    document.getElementById('tg-token').value = cfg.bot_token || '';
+                    document.getElementById('tg-chatid').value = cfg.chat_id || '';
+                });
+        }
+
+        function saveTelegramSettings() {
+            const token = document.getElementById('tg-token').value.trim();
+            const chatid = document.getElementById('tg-chatid').value.trim();
+            fetch('/api/telegram_config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({enabled: true, bot_token: token, chat_id: chatid})
+            })
+            .then(r => r.json())
+            .then(res => {
+                alert(res.success ? 'Đã lưu cấu hình Telegram Bot!' : 'Lỗi lưu cấu hình');
+            });
+        }
+
+        function sendTestTelegram() {
+            const btn = document.getElementById('btn-test-tg');
+            btn.disabled = true;
+            btn.innerText = '⏳ Đang gửi...';
+            fetch('/api/test_telegram', {method: 'POST'})
+                .then(r => r.json())
+                .then(res => {
+                    btn.disabled = false;
+                    btn.innerText = '🧪 Gửi Cảnh Báo Thử';
+                    alert(res.message);
+                });
+        }
+
         let selectedSSID = '';
         function scanWifi() {
             const listEl = document.getElementById('wifi-list');
@@ -609,6 +678,22 @@ def api_record_test_audio():
     try:
         filename = record_event_audio("manual_test", 10)
         return jsonify({"success": True, "filename": filename})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+@app.route("/api/telegram_config", methods=["GET", "POST"])
+def api_telegram_config():
+    if request.method == "POST":
+        data = request.json or {}
+        save_telegram_config(data)
+        return jsonify({"success": True})
+    return jsonify(load_telegram_config())
+
+@app.route("/api/test_telegram", methods=["POST"])
+def api_test_telegram():
+    try:
+        send_telegram_alert_async("🧪 Đây là tin nhắn cảnh báo thử nghiệm từ hệ thống AI DMS!")
+        return jsonify({"success": True, "message": "Đã gửi tin nhắn cảnh báo thử nghiệm tới Telegram!"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
