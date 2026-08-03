@@ -3,11 +3,14 @@ import json
 import time
 import os
 import sqlite3
-import csv
-from flask import Flask, render_template_string, request, jsonify, Response
+import glob
+from flask import Flask, render_template_string, request, jsonify, Response, send_from_directory
+from audio_manager import cleanup_old_audio, AUDIO_DIR, ensure_audio_dir
 
 app = Flask(__name__)
 DB_PATH = "/home/kata/Documents/AI_DMS/dms_history.db"
+
+ensure_audio_dir()
 
 def get_db_sessions():
     if not os.path.exists(DB_PATH):
@@ -45,7 +48,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI DMS - Local Control & Trip Dashboard</title>
+    <title>AI DMS - Local Control & Audio Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * {
@@ -67,7 +70,6 @@ HTML_TEMPLATE = """
             margin: 0 auto;
         }
 
-        /* Header Navigation & Banner */
         .app-header {
             background: rgba(30, 41, 59, 0.6);
             backdrop-filter: blur(16px);
@@ -109,33 +111,30 @@ HTML_TEMPLATE = """
             -webkit-text-fill-color: transparent;
         }
 
-        .brand-desc {
-            font-size: 0.8rem;
-            color: #94a3b8;
-        }
+        .brand-desc { font-size: 0.8rem; color: #94a3b8; }
 
-        /* Tabs Navigation */
         .nav-tabs {
             display: flex;
             background: rgba(15, 23, 42, 0.6);
             padding: 4px;
             border-radius: 14px;
             border: 1px solid rgba(255, 255, 255, 0.05);
+            gap: 4px;
         }
 
         .tab-btn {
-            padding: 10px 18px;
+            padding: 10px 16px;
             border: none;
             background: transparent;
             color: #94a3b8;
             font-weight: 600;
-            font-size: 0.875rem;
+            font-size: 0.85rem;
             border-radius: 10px;
             cursor: pointer;
             transition: all 0.2s ease;
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
         }
 
         .tab-btn.active {
@@ -144,24 +143,17 @@ HTML_TEMPLATE = """
             box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
         }
 
-        .tab-content {
-            display: none;
-            animation: fadeIn 0.3s ease-in-out;
-        }
-
-        .tab-content.active {
-            display: block;
-        }
+        .tab-content { display: none; animation: fadeIn 0.3s ease-in-out; }
+        .tab-content.active { display: block; }
 
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(6px); }
             to { opacity: 1; transform: translateY(0); }
         }
 
-        /* Overview Stat Cards */
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 16px;
             margin-bottom: 24px;
         }
@@ -171,27 +163,18 @@ HTML_TEMPLATE = """
             backdrop-filter: blur(12px);
             border: 1px solid rgba(255, 255, 255, 0.08);
             border-radius: 18px;
-            padding: 20px;
+            padding: 18px;
             display: flex;
             align-items: center;
-            gap: 16px;
+            gap: 14px;
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-            transition: transform 0.2s;
-        }
-
-        .stat-card:hover {
-            transform: translateY(-2px);
-            border-color: rgba(99, 102, 241, 0.3);
         }
 
         .stat-icon-bg {
-            width: 48px;
-            height: 48px;
-            border-radius: 14px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            font-size: 1.3rem;
+            width: 44px; height: 44px;
+            border-radius: 12px;
+            display: flex; justify-content: center; align-items: center;
+            font-size: 1.2rem;
         }
 
         .icon-blue { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
@@ -199,19 +182,9 @@ HTML_TEMPLATE = """
         .icon-amber { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
         .icon-red { background: rgba(239, 68, 68, 0.15); color: #f87171; }
 
-        .stat-val {
-            font-size: 1.5rem;
-            font-weight: 800;
-            color: #f8fafc;
-        }
+        .stat-val { font-size: 1.4rem; font-weight: 800; color: #f8fafc; }
+        .stat-lbl { font-size: 0.75rem; color: #94a3b8; font-weight: 500; }
 
-        .stat-lbl {
-            font-size: 0.8rem;
-            color: #94a3b8;
-            font-weight: 500;
-        }
-
-        /* Glass Panel */
         .glass-panel {
             background: rgba(30, 41, 59, 0.5);
             backdrop-filter: blur(12px);
@@ -229,147 +202,59 @@ HTML_TEMPLATE = """
             margin-bottom: 20px;
         }
 
-        .panel-title {
-            font-size: 1.1rem;
-            font-weight: 700;
-            color: #f1f5f9;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
+        .panel-title { font-size: 1.1rem; font-weight: 700; color: #f1f5f9; }
 
-        /* Table Styling */
-        .table-responsive {
-            width: 100%;
-            overflow-x: auto;
-        }
+        .table-responsive { width: 100%; overflow-x: auto; }
 
-        .data-table {
-            width: 100%;
-            border-collapse: collapse;
-            text-align: left;
-            font-size: 0.875rem;
-        }
-
+        .data-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem; }
         .data-table th {
-            background: rgba(15, 23, 42, 0.6);
-            color: #94a3b8;
-            padding: 14px 16px;
-            font-weight: 600;
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
+            background: rgba(15, 23, 42, 0.6); color: #94a3b8; padding: 12px 14px;
+            font-weight: 600; font-size: 0.75rem; text-transform: uppercase;
             border-bottom: 1px solid rgba(255, 255, 255, 0.08);
         }
-
-        .data-table td {
-            padding: 14px 16px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-            color: #e2e8f0;
-        }
-
-        .data-table tbody tr {
-            transition: background 0.2s;
-        }
-
-        .data-table tbody tr:hover {
-            background: rgba(99, 102, 241, 0.08);
-        }
-
-        .status-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 0.75rem;
-            font-weight: 600;
-        }
-
-        .pill-safe { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-        .pill-warn { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
-        .pill-danger { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+        .data-table td { padding: 12px 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); color: #e2e8f0; }
 
         .btn-action {
-            padding: 8px 16px;
-            background: rgba(99, 102, 241, 0.2);
-            border: 1px solid rgba(99, 102, 241, 0.4);
-            color: #818cf8;
-            border-radius: 10px;
-            font-weight: 600;
-            font-size: 0.8rem;
-            cursor: pointer;
-            transition: all 0.2s;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
+            padding: 6px 14px; background: rgba(99, 102, 241, 0.2);
+            border: 1px solid rgba(99, 102, 241, 0.4); color: #818cf8;
+            border-radius: 10px; font-weight: 600; font-size: 0.8rem;
+            cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
         }
 
-        .btn-action:hover {
-            background: #6366f1;
-            color: #ffffff;
+        .btn-action:hover { background: #6366f1; color: #ffffff; }
+
+        /* Audio Player Bar */
+        audio {
+            height: 36px;
+            outline: none;
+            filter: invert(0.9) hue-rotate(180deg);
+            border-radius: 8px;
         }
 
-        /* Wi-Fi Cards UI */
-        .wifi-grid {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            max-height: 380px;
-            overflow-y: auto;
-        }
-
+        .wifi-grid { display: flex; flex-direction: column; gap: 10px; max-height: 380px; overflow-y: auto; }
         .wifi-card {
-            background: rgba(15, 23, 42, 0.5);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 14px;
-            padding: 16px 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            cursor: pointer;
-            transition: all 0.2s ease;
+            background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 14px; padding: 16px 20px; display: flex; justify-content: space-between;
+            align-items: center; cursor: pointer; transition: all 0.2s ease;
         }
+        .wifi-card:hover { background: rgba(99, 102, 241, 0.15); border-color: rgba(99, 102, 241, 0.4); }
 
-        .wifi-card:hover {
-            background: rgba(99, 102, 241, 0.15);
-            border-color: rgba(99, 102, 241, 0.4);
-            transform: translateX(4px);
-        }
-
-        /* Modal */
         .modal-overlay {
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(15, 23, 42, 0.8);
-            backdrop-filter: blur(8px);
-            display: none;
-            justify-content: center;
-            align-items: center;
-            z-index: 100;
-            padding: 20px;
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(15, 23, 42, 0.8); backdrop-filter: blur(8px);
+            display: none; justify-content: center; align-items: center; z-index: 100; padding: 20px;
         }
-
         .modal {
-            background: #1e293b;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 20px;
-            padding: 24px;
-            width: 100%;
-            max-width: 400px;
-            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
+            background: #1e293b; border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px; padding: 24px; width: 100%; max-width: 400px;
         }
-
         .modal-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 16px; color: #f8fafc; }
         .input-group { margin-bottom: 20px; }
         .input-group label { display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 6px; }
         .input-group input {
             width: 100%; padding: 12px 14px; background: #0f172a;
-            border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px;
-            color: #ffffff; font-size: 0.95rem; outline: none;
+            border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; color: #ffffff; font-size: 0.95rem;
         }
-
         .modal-actions { display: flex; gap: 10px; }
         .btn-cancel { flex: 1; padding: 10px; background: transparent; border: 1px solid rgba(255, 255, 255, 0.1); color: #94a3b8; border-radius: 10px; cursor: pointer; }
         .btn-connect { flex: 1; padding: 10px; background: #6366f1; border: none; color: #ffffff; border-radius: 10px; font-weight: 600; cursor: pointer; }
@@ -377,24 +262,23 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="main-wrapper">
-        <!-- Banner Header -->
         <header class="app-header">
             <div class="brand-box">
                 <div class="logo-icon">🚘</div>
                 <div>
                     <div class="brand-title">AI DMS Dashboard</div>
-                    <div class="brand-desc">Hệ thống Giám sát & Báo cáo Lái xe An toàn</div>
+                    <div class="brand-desc">Giám sát Lái xe & Quản lý Âm thanh Khoang lái</div>
                 </div>
             </div>
             <nav class="nav-tabs">
                 <button class="tab-btn active" onclick="switchTab('sessions')">📊 Chuyến Đi</button>
+                <button class="tab-btn" onclick="switchTab('audio')">🎵 Ghi Âm Cabin</button>
                 <button class="tab-btn" onclick="switchTab('wifi')">📡 Wi-Fi Manager</button>
             </nav>
         </header>
 
-        <!-- TAB 1: THÔNG TIN CHUYẾN ĐỊ (SESSIONS) -->
+        <!-- TAB 1: THÔNG TIN CHUYẾN ĐỊ -->
         <div id="tab-sessions" class="tab-content active">
-            <!-- Dynamic Stats Summary -->
             <div class="stats-grid">
                 <div class="stat-card">
                     <div class="stat-icon-bg icon-blue">🚘</div>
@@ -414,23 +298,22 @@ HTML_TEMPLATE = """
                     <div class="stat-icon-bg icon-amber">😴</div>
                     <div>
                         <div class="stat-val" id="stat-total-alerts">-</div>
-                        <div class="stat-lbl">Tổng Lần Cảnh Báo</div>
+                        <div class="stat-lbl">Tổng Cảnh Báo</div>
                     </div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-icon-bg icon-red">📈</div>
                     <div>
                         <div class="stat-val" id="stat-avg-fatigue">-</div>
-                        <div class="stat-lbl">Độ Mệt Mỏi TB</div>
+                        <div class="stat-lbl">Mệt Mỏi TB</div>
                     </div>
                 </div>
             </div>
 
-            <!-- Trip History Table -->
             <div class="glass-panel">
                 <div class="panel-header">
-                    <div class="panel-title">📋 Danh Sách Hành Trình Lái Xe (Local SQLite)</div>
-                    <a href="/api/export_csv" class="btn-action" target="_blank">📥 Xuất File CSV</a>
+                    <div class="panel-title">📋 Danh Sách Hành Trình Lái Xe (dms_history.db)</div>
+                    <a href="/api/export_csv" class="btn-action" target="_blank">📥 Xuất Báo Cáo CSV</a>
                 </div>
 
                 <div class="table-responsive">
@@ -445,18 +328,47 @@ HTML_TEMPLATE = """
                                 <th>Mất TT</th>
                                 <th>Ngáp</th>
                                 <th>Mệt Mỏi Max</th>
-                                <th>Đánh Giá</th>
                             </tr>
                         </thead>
                         <tbody id="sessions-table-body">
-                            <tr><td colspan="9" style="text-align:center; color:#64748b; padding:20px;">Đang tải lịch sử hành trình...</td></tr>
+                            <tr><td colspan="8" style="text-align:center; color:#64748b; padding:20px;">Đang tải lịch sử hành trình...</td></tr>
                         </tbody>
                     </table>
                 </div>
             </div>
         </div>
 
-        <!-- TAB 2: QUẢN LÝ WI-FI (WIFI MANAGER) -->
+        <!-- TAB 2: GHI ÂM CABIN KHOANG LÁI -->
+        <div id="tab-audio" class="tab-content">
+            <div class="glass-panel">
+                <div class="panel-header">
+                    <div class="panel-title">🎵 Thư Viện Ghi Âm Âm Thanh Khoang Lái (Ring Buffer Safe)</div>
+                    <button class="btn-action" onclick="loadAudioFiles()">🔄 Tải Lại Danh Sách</button>
+                </div>
+                <div style="font-size:0.8rem; color:#94a3b8; margin-bottom:16px;">
+                    💡 <i>Hệ thống tự động dọn dẹp các file cũ (>3 ngày hoặc >1GB) để KHÔNG BAO GIỜ bị tràn bộ nhớ thẻ nhớ SD!</i>
+                </div>
+
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Tên File / Sự Cố</th>
+                                <th>Dung Lượng</th>
+                                <th>Thời Gian Ghi</th>
+                                <th>Phát Âm Thanh (Trực tiếp)</th>
+                                <th>Tải Về</th>
+                            </tr>
+                        </thead>
+                        <tbody id="audio-table-body">
+                            <tr><td colspan="5" style="text-align:center; color:#64748b; padding:20px;">Đang tải danh sách ghi âm...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 3: QUẢN LÝ WI-FI -->
         <div id="tab-wifi" class="tab-content">
             <div class="glass-panel">
                 <div class="panel-header">
@@ -494,8 +406,12 @@ HTML_TEMPLATE = """
                 document.querySelectorAll('.tab-btn')[0].classList.add('active');
                 document.getElementById('tab-sessions').classList.add('active');
                 loadSessions();
-            } else {
+            } else if (tabName === 'audio') {
                 document.querySelectorAll('.tab-btn')[1].classList.add('active');
+                document.getElementById('tab-audio').classList.add('active');
+                loadAudioFiles();
+            } else {
+                document.querySelectorAll('.tab-btn')[2].classList.add('active');
                 document.getElementById('tab-wifi').classList.add('active');
                 scanWifi();
             }
@@ -517,7 +433,7 @@ HTML_TEMPLATE = """
                     tbody.innerHTML = '';
 
                     if (sessions.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; color:#64748b; padding:20px;">Chưa có dữ liệu chuyến đi nào.</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#64748b; padding:20px;">Chưa có dữ liệu chuyến đi nào.</td></tr>';
                         return;
                     }
 
@@ -531,16 +447,6 @@ HTML_TEMPLATE = """
                         totalAlerts += alerts;
                         fatigueSum += (s.avg_fatigue_score || 0);
 
-                        let pillClass = 'pill-safe';
-                        let pillText = '🟢 An toàn';
-                        if (s.drowsiness_count > 2 || (s.max_fatigue_score || 0) > 0.7) {
-                            pillClass = 'pill-danger';
-                            pillText = '🔴 Nguy hiểm';
-                        } else if (alerts > 2 || (s.max_fatigue_score || 0) > 0.4) {
-                            pillClass = 'pill-warn';
-                            pillText = '🟡 Cảnh báo';
-                        }
-
                         const tr = document.createElement('tr');
                         tr.innerHTML = `
                             <td><b>#${s.session_id}</b></td>
@@ -551,18 +457,46 @@ HTML_TEMPLATE = """
                             <td style="color:#fbbf24; font-weight:600;">${s.distraction_count || 0}</td>
                             <td style="color:#c084fc;">${s.yawn_count || 0}</td>
                             <td>${(s.max_fatigue_score || 0).toFixed(2)}</td>
-                            <td><span class="status-pill ${pillClass}">${pillText}</span></td>
                         `;
                         tbody.appendChild(tr);
                     });
 
-                    // Update summary stats
                     document.getElementById('stat-total-trips').innerText = sessions.length;
                     document.getElementById('stat-total-time').innerText = formatSec(totalSec);
                     document.getElementById('stat-total-alerts').innerText = totalAlerts;
                     document.getElementById('stat-avg-fatigue').innerText = (fatigueSum / sessions.length).toFixed(2);
-                })
-                .catch(err => console.error(err));
+                });
+        }
+
+        function loadAudioFiles() {
+            fetch('/api/audio_files')
+                .then(r => r.json())
+                .then(files => {
+                    const tbody = document.getElementById('audio-table-body');
+                    tbody.innerHTML = '';
+                    if (files.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#64748b; padding:20px;">Chưa có file ghi âm nào trong thư viện.</td></tr>';
+                        return;
+                    }
+                    files.forEach(f => {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td><b>🎵 ${f.filename}</b></td>
+                            <td>${f.size_mb} MB</td>
+                            <td>${f.created_time}</td>
+                            <td>
+                                <audio controls preload="none">
+                                    <source src="/audio_logs/${f.filename}" type="audio/wav">
+                                    Trình duyệt không hỗ trợ phát âm thanh.
+                                </audio>
+                            </td>
+                            <td>
+                                <a href="/audio_logs/${f.filename}" download class="btn-action">📥 Tải File</a>
+                            </td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                });
         }
 
         let selectedSSID = '';
@@ -631,22 +565,40 @@ def index():
 
 @app.route("/api/sessions")
 def api_sessions():
-    sessions = get_db_sessions()
-    return jsonify(sessions)
+    return jsonify(get_db_sessions())
+
+@app.route("/api/audio_files")
+def api_audio_files():
+    cleanup_old_audio()
+    files = glob.glob(os.path.join(AUDIO_DIR, "*.wav")) + glob.glob(os.path.join(AUDIO_DIR, "*.mp3"))
+    files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+    res = []
+    for f in files:
+        fname = os.path.basename(f)
+        size_mb = round(os.path.getsize(f) / (1024 * 1024), 2)
+        ctime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(f)))
+        res.append({
+            "filename": fname,
+            "size_mb": size_mb,
+            "created_time": ctime
+        })
+    return jsonify(res)
+
+@app.route("/audio_logs/<path:filename>")
+def serve_audio(filename):
+    return send_from_directory(AUDIO_DIR, filename)
 
 @app.route("/api/export_csv")
 def api_export_csv():
     sessions = get_db_sessions()
     if not sessions:
         return "No session data found", 404
-        
     output = []
     headers = list(sessions[0].keys())
     output.append(",".join(headers))
     for s in sessions:
         row = [str(s[h]) if s[h] is not None else "" for h in headers]
         output.append(",".join(row))
-        
     csv_data = "\n".join(output)
     return Response(
         csv_data,

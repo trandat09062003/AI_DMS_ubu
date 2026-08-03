@@ -1127,6 +1127,11 @@ def main():
                 if not eye_closed_3s_logged:
                     session_drowsiness_count += 1
                     eye_closed_3s_logged = True
+                    try:
+                        from audio_manager import record_event_audio
+                        record_event_audio("drowsiness_3s", 10)
+                    except Exception:
+                        pass
             elif eye_closed_duration >= 1.0:
                 status_text = "CANH BAO - NHAM MAT!"
                 status_color = (0, 165, 255)  # Orange
