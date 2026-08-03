@@ -5,12 +5,14 @@ import os
 import sqlite3
 import glob
 from flask import Flask, render_template_string, request, jsonify, Response, send_from_directory
-from audio_manager import cleanup_old_audio, AUDIO_DIR, ensure_audio_dir, record_event_audio
+from audio_manager import cleanup_old_audio, AUDIO_DIR, ensure_audio_dir, start_continuous_recording
 
 app = Flask(__name__)
 DB_PATH = "/home/kata/Documents/AI_DMS/dms_history.db"
 
 ensure_audio_dir()
+# Tự động kích hoạt ghi âm khoang lái liên tục (Real-time) ngay khi thiết bị khởi động
+start_continuous_recording(chunk_duration_sec=60)
 
 def get_db_sessions():
     if not os.path.exists(DB_PATH):
@@ -48,7 +50,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI DMS - Local Control & Audio Dashboard</title>
+    <title>AI DMS - Local Control & Realtime Audio Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * {
@@ -216,6 +218,33 @@ HTML_TEMPLATE = """
         }
         .data-table td { padding: 12px 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); color: #e2e8f0; }
 
+        .rec-pulse {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            color: #f87171;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 700;
+        }
+
+        .pulse-dot {
+            width: 10px;
+            height: 10px;
+            background: #ef4444;
+            border-radius: 50%;
+            animation: blink 1.2s infinite;
+        }
+
+        @keyframes blink {
+            0% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.3; transform: scale(0.85); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+
         .btn-action {
             padding: 8px 16px; background: rgba(99, 102, 241, 0.2);
             border: 1px solid rgba(99, 102, 241, 0.4); color: #818cf8;
@@ -269,7 +298,7 @@ HTML_TEMPLATE = """
                 <div class="logo-icon">🚘</div>
                 <div>
                     <div class="brand-title">AI DMS Dashboard</div>
-                    <div class="brand-desc">Giám sát Lái xe & Quản lý Âm thanh Khoang lái</div>
+                    <div class="brand-desc">Giám sát Lái xe & Ghi Âm Khoang Lái Thời Gian Thực</div>
                 </div>
             </div>
             <nav class="nav-tabs">
@@ -340,28 +369,28 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- TAB 2: GHI ÂM CABIN KHOANG LÁI -->
+        <!-- TAB 2: GHI ÂM CABIN KHOANG LÁI (REALTIME) -->
         <div id="tab-audio" class="tab-content">
             <div class="glass-panel">
                 <div class="panel-header">
-                    <div class="panel-title">🎵 Thư Viện Ghi Âm Âm Thanh Khoang Lái (Ring Buffer Safe)</div>
-                    <div style="display:flex; gap:10px;">
-                        <button class="btn-action" onclick="recordTestAudio()" id="btn-rec-test">🎙️ Ghi Âm Thử 10s</button>
-                        <button class="btn-action" onclick="loadAudioFiles()">🔄 Tải Lại Danh Sách</button>
+                    <div class="panel-title">🎵 Âm Thanh Khoang Lái Thời Gian Thực (Real-time Recording)</div>
+                    <div style="display:flex; align-items:center; gap:12px;">
+                        <div class="rec-pulse"><div class="pulse-dot"></div> ĐANG GHI ÂM REALTIME</div>
+                        <button class="btn-action" onclick="loadAudioFiles()">🔄 Tải Lại</button>
                     </div>
                 </div>
                 <div style="font-size:0.8rem; color:#94a3b8; margin-bottom:16px;">
-                    💡 <i>Hệ thống tự động dọn dẹp các file cũ (>3 ngày hoặc >1GB) để KHÔNG BAO GIỜ bị tràn bộ nhớ thẻ nhớ SD!</i>
+                    💡 <i>Micro tự động ghi âm khoang lái liên tục từng đoạn 60s ngay từ khi bật thiết bị. Tự động xoay vòng xóa file cũ (>3 ngày / >1GB) để KHÔNG BAO GIỜ bị tràn bộ nhớ!</i>
                 </div>
 
                 <div class="table-responsive">
                     <table class="data-table">
                         <thead>
                             <tr>
-                                <th>Tên File / Sự Cố</th>
+                                <th>File Đoạn Âm Thanh</th>
                                 <th>Dung Lượng</th>
                                 <th>Thời Gian Ghi</th>
-                                <th>Phát Âm Thanh (Trực tiếp)</th>
+                                <th>Phát Trực Tiếp (1-Click Play)</th>
                                 <th>Tải Về</th>
                             </tr>
                         </thead>
@@ -403,10 +432,14 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
+        let audioTimer = null;
+
         function switchTab(tabName) {
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
             
+            if (audioTimer) { clearInterval(audioTimer); audioTimer = null; }
+
             if (tabName === 'sessions') {
                 document.querySelectorAll('.tab-btn')[0].classList.add('active');
                 document.getElementById('tab-sessions').classList.add('active');
@@ -415,6 +448,8 @@ HTML_TEMPLATE = """
                 document.querySelectorAll('.tab-btn')[1].classList.add('active');
                 document.getElementById('tab-audio').classList.add('active');
                 loadAudioFiles();
+                // Tự động làm mới danh sách file mỗi 10 giây để hiển thị đoạn ghi âm mới nhất
+                audioTimer = setInterval(loadAudioFiles, 10000);
             } else {
                 document.querySelectorAll('.tab-btn')[2].classList.add('active');
                 document.getElementById('tab-wifi').classList.add('active');
@@ -480,7 +515,7 @@ HTML_TEMPLATE = """
                     const tbody = document.getElementById('audio-table-body');
                     tbody.innerHTML = '';
                     if (files.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#64748b; padding:20px;">Chưa có file ghi âm nào. Bấm "🎙️ Ghi Âm Thử 10s" để tạo file test.</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#64748b; padding:20px;">Đang ghi âm đoạn đầu tiên... Vui lòng đợi trong giây lát.</td></tr>';
                         return;
                     }
                     files.forEach(f => {
@@ -501,21 +536,6 @@ HTML_TEMPLATE = """
                         `;
                         tbody.appendChild(tr);
                     });
-                });
-        }
-
-        function recordTestAudio() {
-            const btn = document.getElementById('btn-rec-test');
-            btn.disabled = true;
-            btn.innerText = '🔴 Đang Ghi Âm 10s...';
-            fetch('/api/record_test_audio', {method: 'POST'})
-                .then(r => r.json())
-                .then(res => {
-                    setTimeout(() => {
-                        btn.disabled = false;
-                        btn.innerText = '🎙️ Ghi Âm Thử 10s';
-                        loadAudioFiles();
-                    }, 11000);
                 });
         }
 
@@ -603,14 +623,6 @@ def api_audio_files():
             "created_time": ctime
         })
     return jsonify(res)
-
-@app.route("/api/record_test_audio", methods=["POST"])
-def api_record_test_audio():
-    try:
-        filename = record_event_audio("test_button", 10)
-        return jsonify({"success": True, "filename": filename})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)})
 
 @app.route("/audio_logs/<path:filename>")
 def serve_audio(filename):

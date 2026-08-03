@@ -5,6 +5,7 @@ import subprocess
 import threading
 
 AUDIO_DIR = "/home/kata/Documents/AI_DMS/audio_logs"
+recorder_thread = None
 
 def ensure_audio_dir():
     if not os.path.exists(AUDIO_DIR):
@@ -22,7 +23,6 @@ def find_usb_audio_device():
         res = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
         for line in res.stdout.split("\n"):
             if "card " in line and ("Camera" in line or "USB" in line):
-                # Ví dụ: card 2: Camera [USB Camera], device 0: USB Audio
                 parts = line.split(":")
                 card_num = parts[0].replace("card", "").strip()
                 return f"hw:{card_num},0"
@@ -34,7 +34,7 @@ def cleanup_old_audio(max_size_mb=1000, max_days=3):
     """
     Tự động dọn dẹp các file ghi âm cũ để KHÔNG BAO GIỜ bị tràn bộ nhớ SD Card:
     1. Xóa các file cũ hơn max_days (mặc định 3 ngày).
-    2. Nếu tổng dung lượng thư mục > max_size_mb (mặc định 1000MB ~ 1GB), xóa các file cũ nhất cho đến khi < max_size_mb.
+    2. Nếu tổng dung lượng thư mục > max_size_mb (mặc định 1000MB ~ 1GB), xóa các file cũ nhất.
     """
     ensure_audio_dir()
     try:
@@ -47,7 +47,6 @@ def cleanup_old_audio(max_size_mb=1000, max_days=3):
             if file_age_days > max_days:
                 try:
                     os.remove(f)
-                    print(f"[AUDIO CLEANUP] Da xoa file qua cu (> {max_days} ngay): {f}")
                 except Exception:
                     pass
 
@@ -64,47 +63,52 @@ def cleanup_old_audio(max_size_mb=1000, max_days=3):
             try:
                 os.remove(oldest_file)
                 total_bytes -= file_size
-                print(f"[AUDIO CLEANUP] Xoa file cu de giam dung luong bộ nho (<{max_size_mb}MB): {oldest_file}")
             except Exception:
                 pass
     except Exception as e:
         print(f"[AUDIO CLEANUP ERROR] {e}")
 
-def record_event_audio(event_name="drowsiness", duration_sec=10):
+def start_continuous_recording(chunk_duration_sec=60):
     """
-    Ghi âm một đoạn sự cố khoang lái (ví dụ 10s) từ Micro USB Camera và tự động lưu vào audio_logs/
+    Kích hoạt luồng Ghi Âm Khoang Lái Liên Tục (Real-time Continuous Recording):
+    - Tự động bật ngay khi thiết bị khởi động.
+    - Ghi âm liên tục từng block 60 giây và tự cập nhật lên Dashboard.
+    - Tự động xoay vòng bộ nhớ (Ring Buffer) xóa file cũ.
     """
-    ensure_audio_dir()
-    cleanup_old_audio()
-    
-    device_name = find_usb_audio_device()
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    filename = f"{timestamp}_{event_name}_{duration_sec}s.wav"
-    filepath = os.path.join(AUDIO_DIR, filename)
-    
-    cmd = [
-        "arecord",
-        "-D", device_name,
-        "-f", "S16_LE",
-        "-r", "48000",
-        "-c", "1",
-        "-d", str(duration_sec),
-        filepath
-    ]
-    
-    def run_record():
-        try:
-            subprocess.run(cmd, capture_output=True, timeout=duration_sec + 5)
-            if os.path.exists(filepath):
-                os.chmod(filepath, 0o666)
-            print(f"[AUDIO] Da ghi am xong su co khoang lai: {filepath}")
-        except Exception as e:
-            print(f"[AUDIO ERROR] Ghi am loi: {e}")
-            
-    thread = threading.Thread(target=run_record, daemon=True)
-    thread.start()
-    return filename
+    global recorder_thread
+    if recorder_thread and recorder_thread.is_alive():
+        return
+
+    def record_loop():
+        print(f"[AUDIO REALTIME] Đã bật ghi âm khoang lái liên tục (block {chunk_duration_sec}s)...")
+        ensure_audio_dir()
+        while True:
+            try:
+                cleanup_old_audio()
+                device_name = find_usb_audio_device()
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                filename = f"{timestamp}_cabin_realtime.wav"
+                filepath = os.path.join(AUDIO_DIR, filename)
+                
+                cmd = [
+                    "arecord",
+                    "-D", device_name,
+                    "-f", "S16_LE",
+                    "-r", "48000",
+                    "-c", "1",
+                    "-d", str(chunk_duration_sec),
+                    filepath
+                ]
+                subprocess.run(cmd, capture_output=True)
+                if os.path.exists(filepath):
+                    os.chmod(filepath, 0o666)
+            except Exception as e:
+                print(f"[AUDIO REALTIME ERROR] {e}")
+                time.sleep(2)
+
+    recorder_thread = threading.Thread(target=record_loop, daemon=True)
+    recorder_thread.start()
 
 if __name__ == "__main__":
     ensure_audio_dir()
-    cleanup_old_audio()
+    start_continuous_recording()
