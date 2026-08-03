@@ -612,6 +612,7 @@ def main():
     fatigue_scores_history = []
     
     # Cờ kiểm soát sự kiện liên tục
+    eye_closed_1s_logged = False
     eye_closed_3s_logged = False
     distraction_logged = False
     last_db_save_time = time.time()
@@ -973,6 +974,7 @@ def main():
             else:
                 eye_closed_start_time = None
                 eye_closed_duration = 0.0
+                eye_closed_1s_logged = False
                 eye_closed_3s_logged = False
                 
             if is_eye_closed and not eye_previously_closed:
@@ -992,6 +994,11 @@ def main():
                 if yawn_start_time and (time.time() - yawn_start_time) >= 1.5:
                     yawn_timestamps.append(time.time())
                     session_yawn_count += 1
+                    try:
+                        from telegram_bot import send_telegram_alert_async
+                        send_telegram_alert_async("🥱 CẢNH BÁO MỆT MỎI: Tài xế vừa ngáp dài (>1.5s)!", frame)
+                    except Exception:
+                        pass
                 mouth_previously_yawning = False
                 yawn_start_time = None
             
@@ -1138,11 +1145,18 @@ def main():
                         send_telegram_alert_async("CẢNH BÁO NGUY HIỂM: Tài xế nhắm mắt liên tục 3s (Microsleep)!", frame)
                     except Exception:
                         pass
-            elif eye_closed_duration >= 1.0:
-                status_text = "CANH BAO - NHAM MAT!"
+            elif eye_closed_duration >= 1.5:
+                status_text = "CANH BAO - NHAM MAT 1.5S!"
                 status_color = (0, 165, 255)  # Orange
                 alarm_level = 2
                 fatigue_score = max(fatigue_score, 0.85)
+                if not eye_closed_1s_logged:
+                    eye_closed_1s_logged = True
+                    try:
+                        from telegram_bot import send_telegram_alert_async
+                        send_telegram_alert_async("⚠️ CẢNH BÁO: Tài xế nhắm mắt 1.5s!", frame)
+                    except Exception:
+                        pass
                 
             if head_tilted_duration >= 1.0:
                 status_text = "NGUY HIEM - LECH DAU!"
@@ -1155,6 +1169,11 @@ def main():
                 if not distraction_logged:
                     session_distraction_count += 1
                     distraction_logged = True
+                    try:
+                        from telegram_bot import send_telegram_alert_async
+                        send_telegram_alert_async("⚠️ CẢNH BÁO MẤT TẬP TRUNG: Tài xế ngoảnh mặt / lệch đầu rời tầm nhìn đường (>1.5s)!", frame)
+                    except Exception:
+                        pass
             elif not is_head_tilted and detected_face:
                 distraction_logged = False
 
