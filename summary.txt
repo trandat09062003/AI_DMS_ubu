@@ -1,48 +1,34 @@
 ================================================================================
                     AI DRIVER MONITORING SYSTEM (AI_DMS)
-                    TỔNG HỢP KIẾN TRÚC & HƯỚNG DẪN HỆ THỐNG
+                    TỔNG HỢP KIẾN TRÚC & QUY TRÌNH VẬN HÀNH
 ================================================================================
 
-1. TỔNG QUAN DỰ ÁN
+1. TỔNG QUAN HỆ THỐNG
 --------------------------------------------------------------------------------
-Hệ thống Giám sát Tài xế AI (AI_DMS) là giải pháp IoT nhúng kết hợp Trí tuệ Nhân tạo
-chuyên sâu nhằm phát hiện sớm các trạng thái nguy hiểm của tài xế khi điều khiển phương tiện:
-- Buồn ngủ nhẹ (Nhắm mắt liên tục >= 1.5 giây).
-- Ngủ gật nguy hiểm / Vi giấc ngủ (Microsleep nhắm mắt >= 3.0 giây).
-- Ngáp liên tục (MAR vượt ngưỡng).
-- Mất tập trung / Nghiêng đầu / Ngoảnh mặt khỏi hướng lái (Head Pose Pitch/Yaw/Roll).
+AI_DMS là giải pháp IoT nhúng kết hợp Trí tuệ Nhân tạo (Computer Vision & LSTM)
+giám sát an toàn khoang lái, phát hiện buồn ngủ, vi giấc ngủ (>= 3s), ngáp và mất tập trung.
+Hệ thống chạy độc lập (Headless), tự phát Wi-Fi Hotspot "AI_DMS_Hotspot" (Pass: 1234567890),
+cung cấp Web Dashboard cố định tại http://wifi.local, phát giọng nói cảnh báo Tiếng Việt,
+hiển thị OLED I2C 128x64, tự động ghi âm cabin 10s và gửi ảnh cảnh báo qua Telegram Bot.
 
-Hệ thống hoạt động theo cơ chế Headless (không bắt buộc có màn hình HDMI lớn trên xe),
-tự động quản lý mạng, phát âm thanh giọng nói Tiếng Việt, hiển thị màn hình phụ OLED,
-ghi âm cabin, gửi cảnh báo tức thì qua Telegram và cung cấp Web Dashboard quản trị
-tại địa chỉ cố định: http://wifi.local.
-
-2. DANH SÁCH CÁC MODULE VÀ TỆP TIN CHÍNH
+2. CÁC MODULE CHÍNH
 --------------------------------------------------------------------------------
-- drowsiness_detector.py : Module trung tâm AI, xử lý camera, MediaPipe Face Mesh,
-                           tính toán EAR/MAR, suy luận mô hình LSTM, điều khiển logic cảnh báo.
-- lstm_model.py          : Định nghĩa kiến trúc mạng PyTorch LSTM dự đoán chuỗi hành vi.
-- lstm_drowsiness.pth    : Trọng số mô hình LSTM đã được huấn luyện sẵn.
-- train_lstm.py          : Kịch bản thu thập dữ liệu và huấn luyện lại mô hình LSTM.
-- audio_manager.py       : Quản lý ngõ ra âm thanh Jack 3.5mm, mạch TDA2050, phát còi bíp,
-                           phát giọng nói Tiếng Việt và ghi âm cabin qua micro USB Camera.
-- audio_prompts/         : Thư mục chứa các tệp âm thanh mẫu (còi bíp, giọng nói cảnh báo).
-- oled_manager.py        : Driver I2C SSD1306 điều khiển màn hình OLED 0.96 inch 128x64.
-- telegram_bot.py        : Xử lý gửi tin nhắn, ảnh chụp vi phạm và file ghi âm qua Telegram.
-- wifi_dashboard.py      : Web Dashboard quản lý hành trình, cấu hình mạng Wi-Fi, cài đặt
-                           Telegram và kiểm tra phần cứng (Cổng 80).
-- mdns_publisher.py      : Dịch vụ công bố tên miền cố định http://wifi.local và http://dms.local.
-- setup_autohotspot.sh   : Script cấu hình tự động phát trạm Wi-Fi Hotspot khi không có mạng.
-- run_dms.sh             : Script khởi chạy toàn bộ các dịch vụ hệ thống với 1 lệnh duy nhất.
-- view_history.py        : Công cụ dòng lệnh (CLI) truy vấn và xuất CSDL SQLite ra file CSV.
-- test_hardware.py       : Công cụ kiểm tra toàn diện phần cứng (Màn hình, OLED, Loa, GPIO).
-- test_oled.py           : Kiểm tra độc lập màn hình OLED I2C 128x64.
-- test_speaker.py        : Kiểm tra độc lập ngõ ra âm thanh Jack 3.5mm và giọng nói Tiếng Việt.
-- test_camera.py         : Kiểm tra độ phân giải, định dạng MJPG và FPS của Camera USB.
-- camera_config.json     : File lưu cấu hình tham số Camera (USB/CSI, độ phân giải, FPS).
-- calibration_config.json: File lưu ngưỡng hiệu chuẩn mắt/miệng của từng tài xế.
-- telegram_config.json.example : File mẫu cấu hình kết nối Telegram Bot.
-- requirements.txt       : Danh sách các thư viện Python phụ thuộc.
+- drowsiness_detector.py : Module xử lý AI, luồng camera, tính toán EAR/MAR, suy luận LSTM.
+- lstm_model.py          : Định nghĩa kiến trúc PyTorch LSTM.
+- lstm_drowsiness.pth    : Trọng số mô hình LSTM đã huấn luyện.
+- audio_manager.py       : Quản lý âm thanh Jack 3.5mm, TDA2050, giọng nói AI, ghi âm Micro USB.
+- audio_prompts/         : File âm thanh mẫu (còi bíp, thông báo Tiếng Việt).
+- oled_manager.py        : Driver I2C SSD1306 điều khiển màn hình OLED 128x64.
+- telegram_bot.py        : Xử lý gửi tin nhắn, ảnh vi phạm và file ghi âm qua Telegram Bot.
+- wifi_dashboard.py      : Web Dashboard quản lý hành trình, Wi-Fi, Telegram, Test (Cổng 80).
+- mdns_publisher.py      : Dịch vụ công bố tên miền cố định http://wifi.local.
+- setup_autohotspot.sh   : Script cấu hình NetworkManager tự phát Hotspot khi mất mạng.
+- run_dms.sh             : Script khởi chạy toàn bộ hệ thống bằng 1 lệnh duy nhất.
+- view_history.py        : Công cụ CLI truy vấn & xuất lịch sử SQLite ra file CSV.
+- test_hardware.py       : Công cụ kiểm tra toàn diện phần cứng.
+- test_speaker.py        : Kiểm tra riêng âm thanh & giọng nói Tiếng Việt.
+- test_oled.py           : Kiểm tra riêng màn hình OLED 128x64.
+- test_camera.py         : Kiểm tra riêng camera USB, độ phân giải & FPS.
 
 3. SƠ ĐỒ CHÂN KẾT NỐI PHẦN CỨNG (RASPBERRY PI GPIO)
 --------------------------------------------------------------------------------
@@ -58,12 +44,12 @@ tại địa chỉ cố định: http://wifi.local.
 |                   | GND / (-)     | Ground           | Pin 14              |
 |                   | I/O (Signal)  | GPIO 27          | Pin 13              |
 +-------------------+---------------+------------------+---------------------+
-| Động cơ Rung      | VCC           | 5V / 3.3V        | Pin 2 / Pin 17      |
+| Động cơ Rung      | VCC           | 5V / 3.3V        | Pin 4 / Pin 17      |
 | (Vibration Motor) | GND           | Ground           | Pin 20 / Pin 25     |
 |                   | IN (Signal)   | GPIO 17          | Pin 11              |
 +-------------------+---------------+------------------+---------------------+
 | Nút Bấm Hiệu Chuẩn| Chân 1        | GPIO 22          | Pin 15              |
-| (Recalibrate Btn) | Chân 2        | Ground           | Pin 14 (hoặc Pin 9) |
+| (Calibrate Button)| Chân 2        | Ground           | Pin 14 (hoặc Pin 9) |
 +-------------------+---------------+------------------+---------------------+
 | Mạch Âm Thanh     | Audio In L/R  | Jack 3.5mm Audio | Cổng 3.5mm trên Pi  |
 | TDA2050 & Loa     | Nguồn 12V/5V  | Nguồn riêng hoặc | Adapter ngoài       |
@@ -71,29 +57,38 @@ tại địa chỉ cố định: http://wifi.local.
 | Camera USB & Mic  | Cáp USB       | Cổng USB 3.0/2.0 | Cổng USB Raspberry  |
 +-------------------+---------------+------------------+---------------------+
 
-4. THIẾT LẬP CƠ BẢN VÀ LỆNH ĐIỀU KHIỂN
+4. QUY TRÌNH VẬN HÀNH THỰC TẾ (TỪ QUÉT CCCD ĐẾN KẾT THÚC CHUYẾN ĐI)
 --------------------------------------------------------------------------------
-1. Kích hoạt môi trường và cài đặt thư viện:
-   $ python3 -m venv venv
-   $ source venv/bin/activate
-   $ pip install -r requirements.txt
+1. BẬT NGUỒN & KẾT NỐI WI-FI / WEB:
+   - Cấp nguồn cho Raspberry Pi. Hệ thống tự phát Wi-Fi: "AI_DMS_Hotspot" (Pass: 1234567890).
+   - Dùng điện thoại kết nối Wi-Fi trên -> Mở trình duyệt vào: http://wifi.local.
 
-2. Kiểm tra nhanh phần cứng:
-   $ python3 test_hardware.py
-   $ python3 test_oled.py
-   $ python3 test_speaker.py
+2. XÁC THỰC CCCD / VNeID (Chọn 1 trong 3 cách):
+   - Cách 1 (Tự động): Giơ thẻ CCCD hoặc mã QR VNeID trước camera (quét tự động trong 2ms).
+   - Cách 2 (Nút bấm): Nhấn nút cứng trên xe (GPIO 22) hoặc phím 'V'/'Space' để chụp & OCR.
+   - Cách 3 (Qua Web): Mở http://wifi.local -> Tab "Xác Thực VNeID" -> Chọn hồ sơ nhanh,
+     chụp ảnh thẻ hoặc nhập CCCD/Tên -> Bấm "Xác Thực".
+   - Sau khi xác thực, hệ thống phát loa: "Xác thực căn cước công dân và VNeID thành công!".
 
-3. Cài đặt Auto Hotspot và Tên miền cố định:
-   $ sudo ./setup_autohotspot.sh
+3. HIỆU CHUẨN & XỬ LÝ LỖI KHUÔN MẶT:
+   - Loa phát: "Vui lòng nhìn thẳng vào camera để xác thực khuôn mặt".
+   - Tài xế nhìn thẳng vào camera trong 3-5 giây để hệ thống học Baseline (EAR/MAR/Pose).
+   - Khi hoàn tất, loa phát: "Xác thực khuôn mặt thành công. Chúc bạn lái xe an toàn."
+   - XỬ LÝ LỖI: Nếu bị lệch góc, ngồi sai tư thế, hoặc đổi người lái -> Nhấn nút bấm GPIO 22
+     (hoặc phím 'r', hoặc bấm "Quét lại khuôn mặt" trên Web). Hệ thống sẽ giữ nguyên CCCD
+     và Session hiện tại, tự động quét lại tư thế khuôn mặt trong 3 giây.
 
-4. Chạy hệ thống chính:
-   $ chmod +x run_dms.sh
-   $ ./run_dms.sh
+4. CÁC MỨC CẢNH BÁO KHI LÁI XE:
+   - Cấp 0 (Bình thường): Hệ thống im lặng, OLED hiển thị EAR/MAR/FPS.
+   - Cấp 1 (Buồn ngủ nhẹ / Ngáp): Loa phát giọng nói Tiếng Việt nhắc nhở nhẹ nhàng.
+   - Cấp 2 & 3 (Ngủ gật >= 3s / Mất tập trung lâu): Còi Buzzer kêu liên tục + Động cơ rung ghế/
+     vô lăng + Phát giọng nói cảnh báo khẩn cấp + Tự động ghi âm 10s cabin + Chụp ảnh và gửi
+     ngay qua Telegram Bot.
 
-5. Truy cập Web Dashboard quản trị:
-   Mở trình duyệt trên điện thoại hoặc máy tính truy cập: http://wifi.local
-   (Khi kết nối vào Wi-Fi phát từ Pi: AI_DMS_Hotspot - Mật khẩu: 1234567890)
-
-6. Xuất báo cáo chuyến đi ra file CSV:
-   $ python3 view_history.py --export
+5. KIỂM TRA GHI ÂM KHOANG LÁI & XUẤT BÁO CÁO:
+   - Nghe file ghi âm: Mở http://wifi.local -> Tab "Ghi Âm Khoang Lái" -> Bấm Play (▶️) nghe
+     trực tiếp trên trình duyệt điện thoại/laptop.
+   - Xem báo cáo hành trình: Mở http://wifi.local -> Tab "Báo Cáo Chuyến Đi" -> Xem danh sách
+     thời gian lái, số lần vi phạm, điểm mệt mỏi Fatigue Score.
+   - Xuất báo cáo: Bấm nút "Xuất File CSV" trên Web hoặc chạy lệnh: python3 view_history.py --export.
 ================================================================================
