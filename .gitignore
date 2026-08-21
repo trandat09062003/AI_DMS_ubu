@@ -1,7 +1,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.db
+*.db*
 *.log
 .gemini/
 .agents/
@@ -9,5 +9,10 @@ venv/
 .setup_done
 *.jpg
 audio_logs/
-*.wav
 telegram_config.json
+
+# Unignore sound prompts assets
+!audio_prompts/
+!audio_prompts/*.wav
+!audio_prompts/*.mp3
+

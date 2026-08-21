@@ -23,7 +23,9 @@ def get_db_sessions():
         cursor.execute("""
             SELECT session_id, start_time, end_time, duration_seconds, 
                    distraction_count, drowsiness_count, yawn_count, 
-                   avg_fatigue_score, max_fatigue_score 
+                   avg_fatigue_score, max_fatigue_score,
+                   COALESCE(driver_name, 'Nguyễn Văn A') AS driver_name,
+                   COALESCE(vneid_card, '012345678910') AS vneid_card
             FROM dms_sessions 
             ORDER BY session_id DESC
         """)
@@ -275,13 +277,14 @@ HTML_TEMPLATE = """
             </div>
             <nav class="nav-tabs">
                 <button class="tab-btn active" onclick="switchTab('sessions')">📊 Chuyến Đi</button>
+                <button class="tab-btn" onclick="switchTab('vneid')">🪪 Xác Thực Tài Xế</button>
                 <button class="tab-btn" onclick="switchTab('audio')">🎵 Ghi Âm Cabin</button>
                 <button class="tab-btn" onclick="switchTab('telegram')">✈️ Telegram Bot</button>
                 <button class="tab-btn" onclick="switchTab('wifi')">📡 Wi-Fi Manager</button>
             </nav>
         </header>
 
-        <!-- TAB 1: THÔNG TIN CHUYẾN ĐỊ -->
+        <!-- TAB 1: THÔNG TIN CHUYẾN ĐI -->
         <div id="tab-sessions" class="tab-content active">
             <div class="stats-grid">
                 <div class="stat-card">
@@ -342,7 +345,82 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- TAB 2: GHI ÂM CABIN KHOANG LÁI -->
+        <!-- TAB 2: XÁC THỰC TÀI XẾ / VNEID -->
+        <div id="tab-vneid" class="tab-content">
+            <div class="glass-panel">
+                <div class="panel-header">
+                    <div class="panel-title">⚡ 1-Click Chọn Nhanh Tài Xế Thường Dùng</div>
+                </div>
+                <div style="font-size:0.85rem; color:#94a3b8; margin-bottom:16px;">
+                    Chỉ cần chạm 1 nút trên điện thoại để kích hoạt phiên lái xe và chuyển sang bước quét mặt ngay lập tức:
+                </div>
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px; margin-bottom:24px;">
+                    <div class="wifi-card" onclick="quickSelectDriver('Nguyễn Văn A', '079203001234', 'B2 - 79A-123.45')">
+                        <div>
+                            <div style="font-weight:700; color:#f8fafc; font-size:0.95rem;">👤 Nguyễn Văn A</div>
+                            <div style="font-size:0.8rem; color:#94a3b8;">CCCD: 079203001234</div>
+                            <div style="font-size:0.75rem; color:#60a5fa;">Hạng B2 - 79A-123.45</div>
+                        </div>
+                        <div style="color:#6366f1; font-weight:700; font-size:1.1rem;">⚡ Chọn</div>
+                    </div>
+                    <div class="wifi-card" onclick="quickSelectDriver('Trần Thị Bích', '001201004567', 'B1 - 29A-678.90')">
+                        <div>
+                            <div style="font-weight:700; color:#f8fafc; font-size:0.95rem;">👤 Trần Thị Bích</div>
+                            <div style="font-size:0.8rem; color:#94a3b8;">CCCD: 001201004567</div>
+                            <div style="font-size:0.75rem; color:#60a5fa;">Hạng B1 - 29A-678.90</div>
+                        </div>
+                        <div style="color:#6366f1; font-weight:700; font-size:1.1rem;">⚡ Chọn</div>
+                    </div>
+                    <div class="wifi-card" onclick="quickSelectDriver('Lê Hoàng Nam', '048099008899', 'C - 51D-999.88')">
+                        <div>
+                            <div style="font-weight:700; color:#f8fafc; font-size:0.95rem;">👤 Lê Hoàng Nam</div>
+                            <div style="font-size:0.8rem; color:#94a3b8;">CCCD: 048099008899</div>
+                            <div style="font-size:0.75rem; color:#60a5fa;">Hạng C - 51D-999.88</div>
+                        </div>
+                        <div style="color:#6366f1; font-weight:700; font-size:1.1rem;">⚡ Chọn</div>
+                    </div>
+                </div>
+
+                <hr style="border:0; border-top:1px solid rgba(255,255,255,0.08); margin: 20px 0;">
+
+                <div class="panel-header">
+                    <div class="panel-title">📷 Chụp / Tải Ảnh Thẻ CCCD Để AI OCR Nhận Diện Tự Động</div>
+                </div>
+                <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:24px;">
+                    <input type="file" id="card-file-input" accept="image/*" style="display:none;" onchange="uploadCardImage(this)">
+                    <button class="btn-action" onclick="document.getElementById('card-file-input').click()" id="btn-upload-card" style="padding:10px 18px;">
+                        📸 Chụp / Tải Ảnh Thẻ CCCD Từ Điện Thoại
+                    </button>
+                    <span id="ocr-status-text" style="font-size:0.85rem; color:#94a3b8;">Chọn ảnh rõ nét có chứa số CCCD hoặc Mã QR</span>
+                </div>
+
+                <hr style="border:0; border-top:1px solid rgba(255,255,255,0.08); margin: 20px 0;">
+
+                <div class="panel-header">
+                    <div class="panel-title">✏️ Nhập Tùy Chỉnh Thông Tin Tài Xế</div>
+                </div>
+                <div class="input-group">
+                    <label for="driver-name">Họ và Tên Tài Xế:</label>
+                    <input type="text" id="driver-name" placeholder="Ví dụ: Nguyễn Văn A">
+                </div>
+                <div class="input-group">
+                    <label for="driver-vneid">Số Căn Cước Công Dân / VNeID (12 số):</label>
+                    <input type="text" id="driver-vneid" placeholder="Ví dụ: 079203001234">
+                </div>
+                <div class="input-group">
+                    <label for="driver-license">Hạng Bằng Lái & Biển Số Xe:</label>
+                    <input type="text" id="driver-license" placeholder="Ví dụ: B2 - 79A-123.45">
+                </div>
+
+                <div style="display:flex; justify-content:flex-end;">
+                    <button class="btn-action" style="background:#6366f1; color:#ffffff; padding:12px 24px; font-size:0.95rem;" onclick="submitDriverAuth()" id="btn-auth-driver">
+                        🚀 Kích Hoạt Phiên Lái Xe Ngay
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 3: GHI ÂM CABIN KHOANG LÁI -->
         <div id="tab-audio" class="tab-content">
             <div class="glass-panel">
                 <div class="panel-header">
@@ -436,23 +514,18 @@ HTML_TEMPLATE = """
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
 
-            if (tabName === 'sessions') {
-                document.querySelectorAll('.tab-btn')[0].classList.add('active');
-                document.getElementById('tab-sessions').classList.add('active');
-                loadSessions();
-            } else if (tabName === 'audio') {
-                document.querySelectorAll('.tab-btn')[1].classList.add('active');
-                document.getElementById('tab-audio').classList.add('active');
-                loadAudioFiles();
-            } else if (tabName === 'telegram') {
-                document.querySelectorAll('.tab-btn')[2].classList.add('active');
-                document.getElementById('tab-telegram').classList.add('active');
-                loadTelegramConfig();
-            } else {
-                document.querySelectorAll('.tab-btn')[3].classList.add('active');
-                document.getElementById('tab-wifi').classList.add('active');
-                scanWifi();
-            }
+            const tabMap = {
+                'sessions': { btnIdx: 0, contentId: 'tab-sessions', init: loadSessions },
+                'vneid': { btnIdx: 1, contentId: 'tab-vneid', init: () => {} },
+                'audio': { btnIdx: 2, contentId: 'tab-audio', init: loadAudioFiles },
+                'telegram': { btnIdx: 3, contentId: 'tab-telegram', init: loadTelegramConfig },
+                'wifi': { btnIdx: 4, contentId: 'tab-wifi', init: scanWifi }
+            };
+
+            const target = tabMap[tabName] || tabMap['sessions'];
+            document.querySelectorAll('.tab-btn')[target.btnIdx].classList.add('active');
+            document.getElementById(target.contentId).classList.add('active');
+            target.init();
         }
 
         function formatSec(seconds) {
@@ -642,6 +715,75 @@ HTML_TEMPLATE = """
             });
         }
 
+        function quickSelectDriver(name, vneid, lic) {
+            document.getElementById('driver-name').value = name;
+            document.getElementById('driver-vneid').value = vneid;
+            document.getElementById('driver-license').value = lic;
+            submitDriverAuth();
+        }
+
+        function submitDriverAuth() {
+            const name = document.getElementById('driver-name').value.trim() || 'Nguyễn Văn A';
+            const vneid = document.getElementById('driver-vneid').value.trim() || '079203001234';
+            const lic = document.getElementById('driver-license').value.trim() || 'B2';
+            
+            const btn = document.getElementById('btn-auth-driver');
+            btn.disabled = true;
+            btn.innerText = '⏳ Đang kích hoạt...';
+            
+            fetch('/api/authenticate_vneid', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, vneid: vneid, license_class: lic})
+            })
+            .then(r => r.json())
+            .then(res => {
+                btn.disabled = false;
+                btn.innerText = '🚀 Kích Hoạt Phiên Lái Xe Ngay';
+                if (res.success) {
+                    alert(`✅ ${res.message}\n\nHệ thống AI DMS trên xe đã kích hoạt và chuyển sang bước quét khuôn mặt!`);
+                } else {
+                    alert(`❌ Lỗi: ${res.message}`);
+                }
+            })
+            .catch(e => {
+                btn.disabled = false;
+                btn.innerText = '🚀 Kích Hoạt Phiên Lái Xe Ngay';
+                alert('Lỗi kết nối tới AI DMS');
+            });
+        }
+
+        function uploadCardImage(input) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('card_image', file);
+            
+            const statusEl = document.getElementById('ocr-status-text');
+            statusEl.innerHTML = '<span style="color:#fbbf24;">⏳ Đang chạy AI OCR đọc chữ & mã QR...</span>';
+            
+            fetch('/api/ocr_upload_card', {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(res => {
+                if (res.success) {
+                    statusEl.innerHTML = `<span style="color:#34d399;">✅ ${res.message}</span>`;
+                    document.getElementById('driver-name').value = res.name;
+                    document.getElementById('driver-vneid').value = res.vneid;
+                    document.getElementById('driver-license').value = res.license_class;
+                    alert(`✅ ${res.message}\n\nHệ thống đã tự động kích hoạt phiên lái xe trên AI DMS!`);
+                } else {
+                    statusEl.innerHTML = `<span style="color:#f87171;">❌ ${res.message}</span>`;
+                    alert(`❌ ${res.message}`);
+                }
+            })
+            .catch(e => {
+                statusEl.innerHTML = '<span style="color:#f87171;">❌ Lỗi kết nối máy chủ OCR</span>';
+            });
+        }
+
         window.onload = () => loadSessions();
     </script>
 </body>
@@ -694,6 +836,32 @@ def api_test_telegram():
     try:
         send_telegram_alert_async("🧪 Đây là tin nhắn cảnh báo thử nghiệm từ hệ thống AI DMS!")
         return jsonify({"success": True, "message": "Đã gửi tin nhắn cảnh báo thử nghiệm tới Telegram!"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+@app.route("/api/authenticate_vneid", methods=["POST"])
+def api_authenticate_vneid():
+    try:
+        data = request.json or {}
+        name = data.get("name", "").strip() or "Nguyễn Văn A"
+        vneid = data.get("vneid", "").strip() or "012345678910"
+        license_cls = data.get("license_class", "").strip() or "B2 - 79A-123.45"
+        
+        vneid_payload = {
+            "name": name,
+            "vneid": vneid,
+            "license_class": license_cls,
+            "timestamp": time.time()
+        }
+        # Ghi nguyên tử để tiến trình camera không đọc phải JSON đang ghi dở.
+        trigger_tmp_path = "/tmp/dms_vneid_trigger.json.tmp"
+        with open(trigger_tmp_path, "w") as f:
+            json.dump(vneid_payload, f)
+        os.replace(trigger_tmp_path, "/tmp/dms_vneid_trigger.json")
+            
+        return jsonify({"success": True, "message": f"Đã nhận xác thực của {name}; thông tin phiên sẽ được gửi sau khi quét mặt hoàn tất."})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 

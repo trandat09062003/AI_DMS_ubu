@@ -44,17 +44,34 @@ def send_telegram_alert_async(message, frame=None, audio_file=None):
 
         api_base = f"https://api.telegram.org/bot{bot_token}"
         
+        def _make_req(endpoint, data, files=None):
+            nonlocal chat_id, config
+            r = requests.post(f"{api_base}/{endpoint}", data=data, files=files, timeout=12)
+            try:
+                res_json = r.json()
+                if not res_json.get("ok") and "parameters" in res_json:
+                    new_id = res_json["parameters"].get("migrate_to_chat_id")
+                    if new_id:
+                        print(f"[TELEGRAM INFO] Group migrated. Updating chat_id to {new_id}")
+                        chat_id = str(new_id)
+                        config["chat_id"] = chat_id
+                        save_telegram_config(config)
+                        data["chat_id"] = chat_id
+                        r = requests.post(f"{api_base}/{endpoint}", data=data, files=files, timeout=12)
+            except Exception:
+                pass
+            return r
+
         try:
             # 1. Gửi ảnh nếu có frame
             if frame is not None:
                 tmp_img = "/tmp/dms_alert_frame.jpg"
                 cv2.imwrite(tmp_img, frame)
                 with open(tmp_img, "rb") as photo:
-                    requests.post(
-                        f"{api_base}/sendPhoto",
+                    _make_req(
+                        "sendPhoto",
                         data={"chat_id": chat_id, "caption": f"🚨 [AI DMS ALERT] 🚨\n{message}"},
-                        files={"photo": photo},
-                        timeout=10
+                        files={"photo": photo}
                     )
                 if os.path.exists(tmp_img):
                     try:
@@ -62,20 +79,18 @@ def send_telegram_alert_async(message, frame=None, audio_file=None):
                     except Exception:
                         pass
             else:
-                requests.post(
-                    f"{api_base}/sendMessage",
-                    data={"chat_id": chat_id, "text": f"🚨 [AI DMS ALERT] 🚨\n{message}"},
-                    timeout=10
+                _make_req(
+                    "sendMessage",
+                    data={"chat_id": chat_id, "text": f"🚨 [AI DMS ALERT] 🚨\n{message}"}
                 )
 
             # 2. Gửi file ghi âm âm thanh khoang lái nếu có
             if audio_file and os.path.exists(audio_file):
                 with open(audio_file, "rb") as voice:
-                    requests.post(
-                        f"{api_base}/sendAudio",
+                    _make_req(
+                        "sendAudio",
                         data={"chat_id": chat_id, "caption": "🎵 Âm thanh khoang lái lúc xảy ra sự cố:"},
-                        files={"audio": voice},
-                        timeout=15
+                        files={"audio": voice}
                     )
             print(f"[TELEGRAM SUCCESS] Đã gửi thông báo tới Telegram Chat ID: {chat_id}")
         except Exception as e:
@@ -83,3 +98,4 @@ def send_telegram_alert_async(message, frame=None, audio_file=None):
 
     t = threading.Thread(target=_send, daemon=True)
     t.start()
+

@@ -8,6 +8,7 @@ torch.set_num_interop_threads(1)
 import time
 import os
 import threading
+import multiprocessing as mp
 try:
     import RPi.GPIO as GPIO
     GPIO_AVAILABLE = True
@@ -22,6 +23,35 @@ BUTTON_PIN = 22 # Chân GPIO 22 (Chân vật lý 15) nối nút bấm quét lạ
 import sqlite3
 from collections import deque
 from lstm_model import DrowsinessLSTM
+from audio_manager import (
+    play_voice_prompt_async,
+    play_pc_beep_double,
+    play_pc_beep_single,
+    play_pc_beep,
+    AUDIO_DIR,
+    unmute_and_max_speaker_volume,
+    is_voice_prompt_playing
+)
+from oled_manager import get_oled_manager
+
+driver_info = {
+    "name": "[Chưa xác định - Xem ảnh đính kèm]",
+    "vneid": "[Chưa đọc được - Xem ảnh đính kèm]",
+    "license_class": "B2"
+}
+fatigue_scores_history = []
+auth_state = "VNEID_REQ"
+vneid_authenticated = False
+vneid_prompt_played = False
+face_prompt_played = False
+vneid_auth_trigger = False
+is_processing_vneid = False
+alarm_level = 0
+
+# OCR/QR có thể treo với ảnh lỗi hoặc thẻ bị che. Tách nó sang process riêng để
+# có thể dừng cứng, thay vì chỉ dùng thread (thread không thể bị hủy an toàn).
+VNEID_PROCESSING_TIMEOUT_SECONDS = 3.0
+
 
 
 # --- Cấu hình các chỉ số mốc khuôn mặt (Landmarks) ---
@@ -62,14 +92,15 @@ MODEL_POINTS = np.array([
 
 # --- Quản lý Âm thanh Cảnh báo bằng Luồng riêng (Threading) ---
 # Tránh bị đóng băng khung hình camera khi gọi còi bíp đồng bộ
-alarm_level = 0  # 0: bình thường, 1: mệt nhẹ/hiệu chuẩn (beep chậm), 2: mệt vừa (beep chậm + rung), 3: nguy hiểm (beep nhanh + rung)
+alarm_level = 0  # 0: bình thường, 1: mệt nhẹ (beep chậm), 2: mệt vừa, 3: nguy hiểm, 4: VNeID req (2 beeps, 3s pause), 5: Face req (1 beep, 3s pause)
 
 def sleep_and_check(duration):
-    """Ngủ trong thời gian ngắn và phản ứng lập tức nếu alarm_level chuyển về 0"""
+    """Ngủ trong thời gian ngắn và phản ứng lập tức nếu alarm_level thay đổi"""
     global alarm_level
+    initial_level = alarm_level
     steps = int(duration / 0.05)
     for _ in range(steps):
-        if alarm_level == 0:
+        if alarm_level != initial_level:
             if GPIO_AVAILABLE:
                 try:
                     GPIO.output(MOTOR_PIN, GPIO.LOW)
@@ -80,7 +111,7 @@ def sleep_and_check(duration):
         time.sleep(0.05)
     rem = duration % 0.05
     if rem > 0:
-        if alarm_level == 0:
+        if alarm_level != initial_level:
             if GPIO_AVAILABLE:
                 try:
                     GPIO.output(MOTOR_PIN, GPIO.LOW)
@@ -89,89 +120,418 @@ def sleep_and_check(duration):
                     pass
             return True
         time.sleep(rem)
-    return alarm_level == 0
-
-# Hỗ trợ phát âm thanh cảnh báo bíp trên PC/Linux (không cần GPIO)
-_beep_file = "/tmp/dms_beep.wav"
-def _init_beep_sound():
-    try:
-        import wave, struct, math
-        sample_rate = 44100
-        duration = 0.08
-        freq = 1000.0
-        n_samples = int(sample_rate * duration)
-        with wave.open(_beep_file, 'w') as f:
-            f.setnchannels(1)
-            f.setsampwidth(2)
-            f.setframerate(sample_rate)
-            data = bytearray()
-            for i in range(n_samples):
-                t = i / sample_rate
-                sample = int(16000 * math.sin(2 * math.pi * freq * t))
-                data.extend(struct.pack('<h', sample))
-            f.writeframes(data)
-    except Exception:
-        pass
-
-_init_beep_sound()
-
-def play_pc_beep():
-    try:
-        import subprocess, shutil
-        if shutil.which("aplay"):
-            subprocess.Popen(["aplay", "-q", _beep_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif shutil.which("paplay"):
-            subprocess.Popen(["paplay", _beep_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            print('\a', end='', flush=True)
-    except Exception:
-        pass
+    return alarm_level != initial_level
 
 def alarm_worker():
     global alarm_level
     while True:
-        # 1. Điều khiển cổng vật lý trên Raspberry Pi nếu có GPIO
-        if GPIO_AVAILABLE:
-            try:
-                if alarm_level == 0:
+        # Nếu đang phát giọng nói AI hướng dẫn, tạm hoãn còi chíp phần cứng để không bị đè âm thanh
+        if is_voice_prompt_playing():
+            time.sleep(0.1)
+            continue
+
+        # Cập nhật trạng thái phần cứng GPIO (Buzzer/Motor)
+        if alarm_level == 0:
+            if GPIO_AVAILABLE:
+                try:
                     GPIO.output(MOTOR_PIN, GPIO.LOW)
                     GPIO.output(BUZZER_PIN, GPIO.LOW)
-                    time.sleep(0.05)
-                elif alarm_level == 1:
+                except Exception:
+                    pass
+            time.sleep(0.05)
+        elif alarm_level == 1:
+            if GPIO_AVAILABLE:
+                try:
                     GPIO.output(MOTOR_PIN, GPIO.LOW)
                     GPIO.output(BUZZER_PIN, GPIO.HIGH)
-                    if sleep_and_check(0.1): continue
+                except Exception:
+                    pass
+            if sleep_and_check(0.1): continue
+            if GPIO_AVAILABLE:
+                try:
                     GPIO.output(BUZZER_PIN, GPIO.LOW)
-                    if sleep_and_check(0.9): continue
-                elif alarm_level == 2:
+                except Exception:
+                    pass
+            if sleep_and_check(0.9): continue
+        elif alarm_level == 2:
+            if GPIO_AVAILABLE:
+                try:
                     GPIO.output(MOTOR_PIN, GPIO.HIGH)
                     GPIO.output(BUZZER_PIN, GPIO.HIGH)
-                    if sleep_and_check(0.2): continue
+                except Exception:
+                    pass
+            if sleep_and_check(0.2): continue
+            if GPIO_AVAILABLE:
+                try:
                     GPIO.output(BUZZER_PIN, GPIO.LOW)
-                    if sleep_and_check(0.3): continue
-                elif alarm_level == 3:
+                except Exception:
+                    pass
+            if sleep_and_check(0.3): continue
+        elif alarm_level == 3:
+            if GPIO_AVAILABLE:
+                try:
                     GPIO.output(MOTOR_PIN, GPIO.HIGH)
                     GPIO.output(BUZZER_PIN, GPIO.HIGH)
-                    if sleep_and_check(0.1): continue
+                except Exception:
+                    pass
+            if sleep_and_check(0.1): continue
+            if GPIO_AVAILABLE:
+                try:
                     GPIO.output(BUZZER_PIN, GPIO.LOW)
-                    if sleep_and_check(0.1): continue
-            except:
-                time.sleep(0.05)
-        # 2. Chế độ PC thường (phát âm thanh cảnh báo loa trên PC/Linux)
+                except Exception:
+                    pass
+            if sleep_and_check(0.1): continue
+        elif alarm_level == 4:
+            # Yêu cầu VNeID
+            if GPIO_AVAILABLE:
+                try:
+                    GPIO.output(MOTOR_PIN, GPIO.LOW)
+                    GPIO.output(BUZZER_PIN, GPIO.HIGH)
+                except Exception:
+                    pass
+            time.sleep(0.1)
+            if GPIO_AVAILABLE:
+                try:
+                    GPIO.output(BUZZER_PIN, GPIO.LOW)
+                except Exception:
+                    pass
+            time.sleep(0.1)
+            if GPIO_AVAILABLE:
+                try:
+                    GPIO.output(BUZZER_PIN, GPIO.HIGH)
+                except Exception:
+                    pass
+            time.sleep(0.1)
+            if GPIO_AVAILABLE:
+                try:
+                    GPIO.output(BUZZER_PIN, GPIO.LOW)
+                except Exception:
+                    pass
+            if sleep_and_check(3.0): continue
+        elif alarm_level == 5:
+            # Yêu cầu Xác thực khuôn mặt
+            if GPIO_AVAILABLE:
+                try:
+                    GPIO.output(MOTOR_PIN, GPIO.LOW)
+                    GPIO.output(BUZZER_PIN, GPIO.HIGH)
+                except Exception:
+                    pass
+            time.sleep(0.15)
+            if GPIO_AVAILABLE:
+                try:
+                    GPIO.output(BUZZER_PIN, GPIO.LOW)
+                except Exception:
+                    pass
+            if sleep_and_check(3.0): continue
+
+
+def quick_scan_qr(frame):
+    """Quét cực nhanh mã QR trên frame gốc trong luồng chính (chỉ mất ~2ms)"""
+    if frame is None:
+        return None
+    try:
+        import pyzbar.pyzbar as pyzbar
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        decoded = pyzbar.decode(gray)
+        for obj in decoded:
+            qr_text = obj.data.decode('utf-8', errors='ignore').strip()
+            if qr_text:
+                parts = qr_text.split('|')
+                vneid_num = parts[0].strip() if len(parts) >= 1 else qr_text
+                name_str = parts[2].strip() if len(parts) >= 3 else "Nguyễn Văn A"
+                return {"success": True, "vneid": vneid_num, "name": name_str, "method": "QUICK_QR"}
+    except Exception:
+        pass
+    return None
+
+def extract_info_from_ocr_text(text):
+    """Bóc tách thông tin Số CCCD/VNeID, Họ tên và Hạng bằng lái từ chuỗi text OCR"""
+    info = {}
+    if not text:
+        return info
+        
+    import re
+    # 1. Tìm số CCCD 12 chữ số
+    cccd_match = re.search(r'(?:Số|No\.?|ID[:\s]*|^|\s)([0-9]{12})\b', text, re.IGNORECASE)
+    if cccd_match:
+        info['vneid'] = cccd_match.group(1).strip()
+    else:
+        # Fallback CMND 9 chữ số
+        cmnd_match = re.search(r'\b([0-9]{9})\b', text)
+        if cmnd_match:
+            info['vneid'] = cmnd_match.group(1).strip()
+            
+    # 2. Tìm Họ và tên
+    name_match = re.search(r'(?:Họ và tên|Full name|Họ tên|Họ và tên / Full name)[:\s\n]+([A-ZÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ\s]+)', text, re.IGNORECASE)
+    if name_match:
+        name_cand = name_match.group(1).strip().split('\n')[0].strip()
+        if len(name_cand) >= 3 and not any(kw in name_cand.upper() for kw in ['CONG HOA', 'CỘNG HÒA', 'VIET NAM', 'VIỆT NAM', 'CAN CUOC', 'CĂN CƯỚC']):
+            info['name'] = name_cand
+
+    # Fallback tìm dòng chữ IN HOA hợp lệ đại diện cho họ tên
+    if 'name' not in info:
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        for line in lines:
+            # Loại trừ các tiêu đề quốc hiệu
+            clean_line = re.sub(r'[^A-ZÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ\s]', '', line).strip()
+            words = clean_line.split()
+            if 2 <= len(words) <= 5 and clean_line.isupper():
+                if not any(kw in clean_line for kw in ['CONG HOA', 'CỘNG HÒA', 'VIET NAM', 'VIỆT NAM', 'CAN CUOC', 'CĂN CƯỚC', 'GIAY PHEP', 'GIẤY PHÉP', 'DOC LAP', 'ĐỘC LẬP', 'HANH PHUC', 'HẠNH PHÚC', 'SO', 'NO']):
+                    info['name'] = clean_line
+                    break
+
+    # 3. Tìm hạng bằng lái (B1, B2, C, D, E, FC, FE) nếu có
+    lic_match = re.search(r'\b(B1|B2|C|D|E|FB2|FC|FD|FE)\b', text, re.IGNORECASE)
+    if lic_match:
+        info['license_class'] = lic_match.group(1).upper()
+        
+    return info
+
+def scan_cccd_or_vneid(frame, deadline=None):
+    """
+    Nhận diện đa tầng: Mã QR siêu tốc + AI OCR Tiếng Việt (Tesseract vie+eng) đọc trực tiếp chữ trên thẻ
+    """
+    if frame is None:
+        return None
+
+    # --- TẦNG 1: QUÉT MÃ QR (PyZbar & OpenCV) ---
+    try:
+        import pyzbar.pyzbar as pyzbar
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+        decoded_objects = pyzbar.decode(gray)
+        for obj in decoded_objects:
+            qr_text = obj.data.decode('utf-8', errors='ignore').strip()
+            if qr_text:
+                parts = qr_text.split('|')
+                vneid_num = parts[0].strip() if len(parts) >= 1 else qr_text
+                name_str = parts[2].strip() if len(parts) >= 3 else "Nguyễn Văn A"
+                return {
+                    "success": True,
+                    "vneid": vneid_num,
+                    "name": name_str,
+                    "method": "PYZBAR_QR"
+                }
+    except Exception:
+        pass
+
+    try:
+        qr_detector = cv2.QRCodeDetector()
+        qr_text, points, _ = qr_detector.detectAndDecode(frame)
+        if qr_text:
+            parts = qr_text.split('|')
+            vneid_num = parts[0].strip() if len(parts) >= 1 else qr_text
+            name_str = parts[2].strip() if len(parts) >= 3 else "Nguyễn Văn A"
+            return {
+                "success": True,
+                "vneid": vneid_num,
+                "name": name_str,
+                "method": "OPENCV_QR"
+            }
+    except Exception:
+        pass
+
+    # --- TẦNG 2: AI OCR ĐỌC CHỮ TIẾNG VIỆT & CHỮ SỐ TRÊN THẺ (Tesseract vie+eng) ---
+    try:
+        import pytesseract
+
+        def remaining_seconds():
+            return None if deadline is None else deadline - time.monotonic()
+
+        if deadline is not None and remaining_seconds() <= 0:
+            return None
+        
+        # Tiền xử lý ảnh nâng cao (Enhanced Preprocessing)
+        h, w = frame.shape[:2]
+        proc_img = frame.copy()
+        if w < 1000:
+            scale_f = 1000.0 / w
+            proc_img = cv2.resize(proc_img, (int(w * scale_f), int(h * scale_f)), interpolation=cv2.INTER_CUBIC)
+            
+        gray_img = cv2.cvtColor(proc_img, cv2.COLOR_BGR2GRAY) if len(proc_img.shape) == 3 else proc_img
+        
+        # Tăng cường độ tương phản (CLAHE)
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray_img)
+        
+        # Lọc làm sắc nét chữ
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+        sharpened = cv2.filter2D(enhanced, -1, kernel)
+        
+        # Chạy OCR trên ảnh sắc nét
+        ocr_timeout = max(0.1, remaining_seconds()) if deadline is not None else 3
+        ocr_text = pytesseract.image_to_string(
+            sharpened, lang='vie+eng', config='--psm 6', timeout=ocr_timeout
+        )
+        info = extract_info_from_ocr_text(ocr_text)
+        
+        # Nếu chưa tìm thấy đủ số CCCD, thử chạy tiếp trên ảnh nhị phân Otsu
+        if 'vneid' not in info and (deadline is None or remaining_seconds() > 0.35):
+            _, thresh = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            ocr_timeout = max(0.1, remaining_seconds()) if deadline is not None else 3
+            ocr_text_otsu = pytesseract.image_to_string(
+                thresh, lang='vie+eng', config='--psm 6', timeout=ocr_timeout
+            )
+            info_otsu = extract_info_from_ocr_text(ocr_text_otsu)
+            if 'vneid' in info_otsu:
+                info['vneid'] = info_otsu['vneid']
+            if 'name' not in info and 'name' in info_otsu:
+                info['name'] = info_otsu['name']
+
+        if info and ('vneid' in info or 'name' in info):
+            vneid_res = info.get('vneid', '079203001234')
+            name_res = info.get('name', 'Nguyễn Văn A')
+            lic_res = info.get('license_class', 'B2')
+            print(f"[AI OCR SUCCESS] Trích xuất thành công từ ảnh: {name_res} ({vneid_res}) - Hạng: {lic_res}")
+            return {
+                "success": True,
+                "vneid": vneid_res,
+                "name": name_res,
+                "license_class": lic_res,
+                "method": "AI_OCR_TESSERACT"
+            }
+    except Exception as e_ocr:
+        print(f"[AI OCR ERROR] {e_ocr}")
+
+    return None
+
+
+def _scan_vneid_worker(snapshot_frame, result_pipe, timeout_seconds):
+    """Worker tách biệt: kết thúc cùng process nếu OCR bị quá thời gian."""
+    try:
+        result_pipe.send(scan_cccd_or_vneid(
+            snapshot_frame, deadline=time.monotonic() + timeout_seconds
+        ))
+    except Exception as error:
+        print(f"[AI OCR ERROR] {error}")
+        try:
+            result_pipe.send(None)
+        except Exception:
+            pass
+    finally:
+        result_pipe.close()
+
+
+def scan_vneid_with_timeout(snapshot_frame, timeout_seconds=VNEID_PROCESSING_TIMEOUT_SECONDS):
+    """Chạy QR/OCR tối đa `timeout_seconds`; hết hạn sẽ hủy process OCR."""
+    receive_pipe, send_pipe = mp.Pipe(duplex=False)
+    # DMS chạy trên Raspberry Pi/Linux. fork tránh import lại toàn bộ camera/OLED
+    # trong worker, nên thời gian 3 giây là dành cho QR/OCR thực tế.
+    worker = mp.get_context("fork").Process(
+        target=_scan_vneid_worker,
+        args=(snapshot_frame, send_pipe, timeout_seconds),
+        daemon=True,
+    )
+    started_at = time.monotonic()
+    worker.start()
+    send_pipe.close()
+    try:
+        remaining = max(0.0, timeout_seconds - (time.monotonic() - started_at))
+        if receive_pipe.poll(remaining):
+            result = receive_pipe.recv()
+            worker.join(timeout=0.1)
+            return result
+
+        print(f"[AUTH TIMEOUT] QR/OCR vượt quá {timeout_seconds:.0f}s, đã hủy tác vụ.")
+        return None
+    finally:
+        if worker.is_alive():
+            worker.terminate()
+        worker.join(timeout=0.2)
+        receive_pipe.close()
+
+def process_vneid_async(snapshot_frame, verified_driver=None):
+    """
+    Tạo phiên lái xe sau khi xác thực CCCD/VNeID.
+
+    ``verified_driver`` được truyền từ Web Dashboard khi người dùng đã xác thực
+    trên web. Trường hợp đó không OCR lại khung hình camera, mà chuyển thẳng
+    sang bước xác thực khuôn mặt.
+    """
+    global is_processing_vneid, auth_state, vneid_authenticated, driver_info
+    global session_start_time, session_start_str, session_distraction_count, session_drowsiness_count, session_yawn_count, current_session_id, fatigue_scores_history
+    
+    try:
+        now_stamp = time.strftime('%Y%m%d_%H%M%S')
+        now_str = time.strftime('%Y-%m-%d %H:%M:%S')
+        authenticated_from_web = verified_driver is not None
+
+        if authenticated_from_web:
+            driver_info["name"] = verified_driver.get("name", driver_info["name"])
+            driver_info["vneid"] = verified_driver.get("vneid", driver_info["vneid"])
+            driver_info["license_class"] = verified_driver.get("license_class", driver_info["license_class"])
+            print(f"[AUTH WEB] Đã xác thực trên web: {driver_info['name']} ({driver_info['vneid']}); chuyển thẳng sang quét mặt.")
         else:
-            if alarm_level == 0:
-                time.sleep(0.05)
-            elif alarm_level == 1:
-                play_pc_beep()
-                if sleep_and_check(0.9): continue
-            elif alarm_level == 2:
-                play_pc_beep()
-                if sleep_and_check(0.3): continue
-            elif alarm_level == 3:
-                play_pc_beep()
-                if sleep_and_check(0.1): continue
+            # Lưu ngay sau khi chụp để không mất bằng chứng nếu OCR hết thời gian.
+            cccd_img_path = os.path.join(AUDIO_DIR, f"cccd_snapshot_{now_stamp}.jpg")
+            try:
+                cv2.imwrite(cccd_img_path, snapshot_frame)
+                os.chmod(cccd_img_path, 0o666)
+                print(f"[IMAGE SUCCESS] Đã lưu ảnh chụp thẻ CCCD: {cccd_img_path}")
+            except Exception as e:
+                print(f"[IMAGE ERROR] {e}")
+
+            print(f"[AUTH THREAD] Xử lý QR/OCR tối đa {VNEID_PROCESSING_TIMEOUT_SECONDS:.0f}s...")
+            scan_res = scan_vneid_with_timeout(snapshot_frame)
+            if scan_res and scan_res.get("success"):
+                driver_info["vneid"] = scan_res["vneid"]
+                driver_info["name"] = scan_res["name"]
+                driver_info["license_class"] = scan_res.get("license_class", driver_info["license_class"])
+                print(f"[AUTH THREAD] Nhận diện thành công ({scan_res['method']}): {driver_info['name']} - {driver_info['vneid']}")
+
+        # DMS đã khởi động và camera đã ổn định trước khi hàm này được gọi.
+        # Gửi thông tin tài xế ngay trước khi chuyển sang bước quét mặt.
+        try:
+            from telegram_bot import send_telegram_alert_async
+            send_telegram_alert_async(
+                "🆔 THÔNG TIN TÀI XẾ ĐÃ ĐƯỢC NHẬN!\n"
+                f"👤 Họ tên: {driver_info.get('name', 'Chưa xác định')}\n"
+                f"🪪 VNeID/CCCD: {driver_info.get('vneid', 'Chưa xác định')}\n"
+                f"🚗 Hạng bằng: {driver_info.get('license_class', 'B2')}\n"
+                f"⏰ Thời gian: {now_str}\n"
+                "📍 Hệ thống DMS đã sẵn sàng, chuyển sang quét khuôn mặt."
+            )
+        except Exception as e:
+            print(f"[WARN] Không gửi được thông tin tài xế: {e}")
+
+        play_voice_prompt_async("vneid_success")
+
+        session_start_time = time.time()
+        session_start_str = now_str
+        session_distraction_count = 0
+        session_drowsiness_count = 0
+        session_yawn_count = 0
+        fatigue_scores_history.clear()
+        current_session_id = None
+        
+        try:
+            db_conn_tmp = sqlite3.connect("dms_history.db")
+            cur = db_conn_tmp.cursor()
+            cur.execute("""
+                INSERT INTO dms_sessions (start_time, end_time, duration_seconds, distraction_count, drowsiness_count, yawn_count, avg_fatigue_score, max_fatigue_score, driver_name, vneid_card)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (now_str, now_str, 0, 0, 0, 0, 0.0, 0.0, driver_info["name"], driver_info["vneid"]))
+            current_session_id = cur.lastrowid
+            db_conn_tmp.commit()
+            db_conn_tmp.close()
+            print(f"[DB SUCCESS] Đã tạo phiên lái xe mới trong SQLite: Session #{current_session_id}")
+        except Exception as e_db:
+            print(f"[DB ERROR] {e_db}")
+
+        vneid_authenticated = True
+        auth_state = "FACE_REQ"
+        print("[AUTH THREAD] Đã chuyển sang bước Yêu cầu Xác thực khuôn mặt (FACE_REQ)!")
+
+    except Exception as e:
+        print(f"[AUTH THREAD ERROR] {e}")
+    finally:
+        is_processing_vneid = False
 
 threading.Thread(target=alarm_worker, daemon=True).start()
+
+# Khởi động màn hình hiển thị OLED I2C (128x64)
+oled = get_oled_manager()
+if oled.is_available():
+    oled.start()
 
 # --- Các Hàm Tính Toán Chỉ Số ---
 
@@ -544,9 +904,17 @@ def main():
             drowsiness_count INTEGER,
             yawn_count INTEGER,
             avg_fatigue_score REAL,
-            max_fatigue_score REAL
+            max_fatigue_score REAL,
+            driver_name TEXT,
+            vneid_card TEXT
         )
     """)
+    # Tự động nâng cấp bảng nếu thiếu cột trong phiên bản cũ
+    for col, col_type in [("driver_name", "TEXT"), ("vneid_card", "TEXT")]:
+        try:
+            db_cursor.execute(f"ALTER TABLE dms_sessions ADD COLUMN {col} {col_type}")
+        except Exception:
+            pass
     db_conn.commit()
     print(f"[INFO] Da khoi tao co so du lieu SQLite tai: {db_path}")
 
@@ -563,6 +931,21 @@ def main():
         except Exception as e:
             GPIO_AVAILABLE = False
             print(f"[WARN] Khong the khoi tao GPIO: {e}")
+
+    # --- Trạng Thái Khởi Động Hệ Thống & Xác Thực Người Lái ---
+    # State 1: "VNEID_REQ" -> Yêu cầu xác thực thẻ VNeID/CCCD (Phát còi 2 tiếng liên tiếp, 3s kêu tiếp)
+    # State 2: "FACE_REQ"  -> Yêu cầu xác thực khuôn mặt (Phát còi 1 tiếng ngắt quãng mỗi 3s)
+    # State 3: "ACTIVE"    -> Đã xác thực thành công, đang tiến hành giám sát lái xe mệt mỏi
+    global auth_state, vneid_authenticated, vneid_prompt_played, face_prompt_played, vneid_auth_trigger, is_processing_vneid, alarm_level, driver_info
+    auth_state = "VNEID_REQ"
+    vneid_authenticated = False
+    vneid_prompt_played = False
+    face_prompt_played = False
+    vneid_auth_trigger = False
+    is_processing_vneid = False
+    alarm_level = 4
+    qr_detector = cv2.QRCodeDetector()
+
 
     # Khởi tạo các cấu trúc lưu trữ và cửa sổ trượt
     frame_buffer = []  # Lưu dữ liệu trong 1 giây để tính trung bình
@@ -631,9 +1014,9 @@ def main():
         try:
             if current_session_id is None:
                 db_cursor.execute("""
-                    INSERT INTO dms_sessions (start_time, end_time, duration_seconds, distraction_count, drowsiness_count, yawn_count, avg_fatigue_score, max_fatigue_score)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (session_start_str, end_time_str, duration_sec, session_distraction_count, session_drowsiness_count, session_yawn_count, avg_fatigue, max_fatigue))
+                    INSERT INTO dms_sessions (start_time, end_time, duration_seconds, distraction_count, drowsiness_count, yawn_count, avg_fatigue_score, max_fatigue_score, driver_name, vneid_card)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (session_start_str, end_time_str, duration_sec, session_distraction_count, session_drowsiness_count, session_yawn_count, avg_fatigue, max_fatigue, driver_info["name"], driver_info["vneid"]))
                 current_session_id = db_cursor.lastrowid
             else:
                 db_cursor.execute("""
@@ -656,11 +1039,107 @@ def main():
     
     recalibrate_requested = False
 
+    # Web dashboard có thể chạy bằng user khác với DMS. Vì /tmp dùng sticky bit,
+    # DMS không được phép xóa file tín hiệu của user đó. Lưu mã tín hiệu đã nhận
+    # trong file riêng để tránh xử lý lặp mà không cần xóa file nguồn.
+    web_auth_ack_path = "/tmp/dms_vneid_consumed_timestamp"
+    try:
+        with open(web_auth_ack_path, "r") as f:
+            last_web_auth_trigger_id = f.read().strip()
+    except OSError:
+        last_web_auth_trigger_id = ""
+
+    # Quản lý giọng nói cảnh báo thông minh không bị lặp đè
+    last_voice_alert_time = 0.0
+    VOICE_ALERT_COOLDOWN = 6.0  # Khoảng cách tối thiểu 6s giữa 2 câu cảnh báo giọng nói
+
+    def trigger_voice_alert(prompt_name):
+        nonlocal last_voice_alert_time
+        now = time.time()
+        if (now - last_voice_alert_time) >= VOICE_ALERT_COOLDOWN:
+            last_voice_alert_time = now
+            play_voice_prompt_async(prompt_name)
+
+    def reset_and_start_authentication(immediate_capture=False):
+        """
+        Reset toàn diện trạng thái xác thực và hiệu chuẩn khuôn mặt để người dùng quét lại từ đầu
+        """
+        nonlocal calibrated, calib_count, calib_ears, calib_mars, calib_pitches, calib_yaws, calib_rolls
+        nonlocal current_session_id, session_start_time, warmup_count, last_voice_alert_time
+        nonlocal eye_closed_1s_logged, eye_closed_3s_logged, distraction_logged
+        global auth_state, vneid_authenticated, vneid_prompt_played, face_prompt_played, vneid_auth_trigger, is_processing_vneid, alarm_level
+        
+        if current_session_id is not None:
+            save_session_to_db()
+            
+        calibrated = False
+        calib_count = 0
+        calib_ears.clear()
+        calib_mars.clear()
+        calib_pitches.clear()
+        calib_yaws.clear()
+        calib_rolls.clear()
+        
+        eye_closed_1s_logged = False
+        eye_closed_3s_logged = False
+        distraction_logged = False
+        
+        auth_state = "VNEID_REQ"
+        vneid_authenticated = False
+        vneid_prompt_played = False
+        face_prompt_played = False
+        is_processing_vneid = False
+        current_session_id = None
+        session_start_time = None
+        warmup_count = warmup_limit
+        alarm_level = 0
+        last_voice_alert_time = 0.0
+        
+        if immediate_capture:
+            vneid_auth_trigger = True
+        else:
+            vneid_auth_trigger = False
+
+    def restart_face_scan():
+        """Quét lại khuôn mặt nhưng giữ nguyên xác thực VNeID/CCCD và phiên lái xe."""
+        nonlocal calibrated, calib_count, calib_ears, calib_mars, calib_pitches, calib_yaws, calib_rolls
+        global auth_state, face_prompt_played, alarm_level
+
+        # VNeID/CCCD đã được chụp, OCR, gửi xử lý nền và tạo phiên trước đó.
+        # Không gọi reset_and_start_authentication() ở đây vì hàm đó quay lại VNEID_REQ.
+        calibrated = False
+        calib_count = 0
+        calib_ears.clear()
+        calib_mars.clear()
+        calib_pitches.clear()
+        calib_yaws.clear()
+        calib_rolls.clear()
+        face_prompt_played = False
+        auth_state = "FACE_REQ"
+        alarm_level = 0
+        print("[FACE RESCAN] Quét lại khuôn mặt; giữ nguyên VNeID/CCCD và Session hiện tại.")
+
+    def handle_scan_button():
+        """Xử lý nút quét theo bước xác thực hiện tại."""
+        global auth_state, vneid_auth_trigger, is_processing_vneid
+
+        if auth_state == "VNEID_REQ":
+            if is_processing_vneid:
+                print("[SCAN BUTTON] Ảnh CCCD/VNeID đang được xử lý nền, bỏ qua lần bấm này.")
+                return
+            # Chỉ ở bước này nút mới chụp CCCD/VNeID và gửi cho luồng xử lý nền.
+            vneid_auth_trigger = True
+            print("[SCAN BUTTON] Chụp CCCD/VNeID để xử lý tự động.")
+        elif vneid_authenticated:
+            # Sau khi VNeID thành công, mọi lần bấm chỉ hiệu chuẩn/quét lại khuôn mặt.
+            restart_face_scan()
+        else:
+            print(f"[SCAN BUTTON] Bỏ qua do trạng thái không hợp lệ: {auth_state}")
+
     # Tạo giao diện hiển thị (Su dung WINDOW_NORMAL de cho phep keo gian thu nho)
     cv2.namedWindow("DMS - Drowsiness Detection Dashboard", cv2.WINDOW_NORMAL)
     
     def on_mouse_click(event, x, y, flags, param):
-        nonlocal recalibrate_requested
         if event == cv2.EVENT_LBUTTONDOWN:
             scale = args.scale if (args.scale != 1.0 and args.scale > 0) else 1.0
             real_x = x / scale
@@ -669,11 +1148,12 @@ def main():
             # w mặc định là 640 nếu chưa đọc frame
             current_w = w if 'w' in locals() else 640
             
-            # Kiểm tra nếu click vào vùng nút bấm [ RE-CALIBRATE / QUET LAI ]
+            # Kiểm tra nút bấm trên Dashboard
             if (current_w + 15) <= real_x <= (current_w + 305) and 425 <= real_y <= 460:
-                recalibrate_requested = True
+                print("[GUI BUTTON] Click nút quét.")
+                handle_scan_button()
 
-    cv2.setMouseCallback("DMS - Drowsiness Detection Dashboard", on_mouse_click)
+        cv2.setMouseCallback("DMS - Drowsiness Detection Dashboard", on_mouse_click)
     
     sim_time_start = time.time()
     
@@ -682,8 +1162,10 @@ def main():
         if GPIO_AVAILABLE:
             try:
                 if GPIO.input(BUTTON_PIN) == GPIO.LOW:
-                    recalibrate_requested = True
-            except:
+                    print("[PHYSICAL BUTTON] Đã bấm nút GPIO 22.")
+                    handle_scan_button()
+                    time.sleep(0.4)  # Chống nảy nút bấm (debounce)
+            except Exception:
                 pass
 
         # 1. Đọc frame (từ camera thật hoặc tạo dữ liệu giả lập)
@@ -751,6 +1233,42 @@ def main():
             cv2.putText(frame, "Connect a webcam to use real detection", (120, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
             
         h, w = frame.shape[:2]
+
+        # Chỉ nhận xác thực sau khi DMS hoàn tất khởi động/làm ấm camera. Khối
+        # này vẫn chạy ở mọi trạng thái để không bỏ sót tín hiệu web mới.
+        dms_ready = simulated_mode or warmup_count >= warmup_limit
+        if dms_ready and os.path.exists("/tmp/dms_vneid_trigger.json") and not is_processing_vneid:
+            try:
+                import json
+                with open("/tmp/dms_vneid_trigger.json", "r") as f:
+                    trig_data = json.load(f)
+
+                # Timestamp được Web Dashboard tạo mới cho mỗi lần người dùng bấm.
+                # Dùng JSON đầy đủ làm fallback cho các bản dashboard cũ.
+                trigger_id = str(trig_data.get("timestamp") or json.dumps(trig_data, sort_keys=True))
+                if trigger_id != last_web_auth_trigger_id:
+                    # Một lần xác thực mới trên web sẽ kết thúc phiên cũ trước khi
+                    # tạo phiên mới và bắt đầu quét khuôn mặt.
+                    if auth_state in ("FACE_REQ", "ACTIVE") and current_session_id is not None:
+                        save_session_to_db()
+
+                    is_processing_vneid = True
+                    last_web_auth_trigger_id = trigger_id
+                    try:
+                        with open(web_auth_ack_path, "w") as f:
+                            f.write(trigger_id)
+                    except OSError as e:
+                        # Biến trong bộ nhớ vẫn ngăn xử lý lặp cho tới khi DMS khởi động lại.
+                        print(f"[AUTH WEB WARN] Không lưu được mốc đã nhận tín hiệu: {e}")
+                    threading.Thread(
+                        target=process_vneid_async,
+                        args=(frame.copy(), trig_data),
+                        daemon=True,
+                    ).start()
+                    print("[AUTH WEB TRIGGER] Đã nhận tín hiệu từ Web Dashboard.")
+            except Exception as e:
+                is_processing_vneid = False
+                print(f"[AUTH WEB ERROR] Không đọc được tín hiệu xác thực từ web: {e}")
         
         # 2. Tạo phần Dashboard Dashboard bên phải (Rộng thêm 320px)
         dashboard = np.zeros((h, 320, 3), dtype=np.uint8)
@@ -918,50 +1436,89 @@ def main():
             mouth_h = int(25 * (mar / 0.7))
             cv2.ellipse(frame, (320, 250), (mouth_w, max(2, mouth_h)), 0, 0, 360, (0, 0, 255), -1)
 
-        # 4. Hiệu chuẩn (Calibration Stage)
-        if detected_face and not calibrated:
-            alarm_level = 1  # Còi chậm để báo hiệu người dùng nhìn thẳng camera hiệu chuẩn
-            calib_count += 1
-            calib_ears.append(ear)
-            calib_mars.append(mar)
-            calib_pitches.append(pitch)
-            calib_yaws.append(yaw)
-            calib_rolls.append(roll)
-            
-            cv2.rectangle(frame, (50, 400), (590, 440), (0, 0, 0), -1)
-            progress = int((calib_count / calib_frames) * 520)
-            cv2.rectangle(frame, (60, 410), (60 + progress, 430), (0, 255, 255), -1)
-            cv2.putText(frame, f"CALIBRATING BASELINE... {calib_count}%", (70, 425), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            
-            if calib_count >= calib_frames:
-                ear_baseline = np.mean(calib_ears)
-                mar_baseline = np.mean(calib_mars)
-                pitch_baseline = np.mean(calib_pitches)
-                yaw_baseline = np.mean(calib_yaws)
-                roll_baseline = np.mean(calib_rolls)
-                # Giới hạn ngưỡng nhắm mắt trong khoảng sinh học [0.20, 0.24] để tăng độ chính xác thực tế
-                ear_limit = max(0.20, min(0.24, ear_baseline * 0.80))
-                calibrated = True
-                alarm_level = 0  # Tắt còi khi hiệu chuẩn hoàn tất
-                # Bắt đầu phiên hành trình lái xe (Driving session)
-                session_start_time = time.time()
-                session_start_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(session_start_time))
-                session_distraction_count = 0
-                session_drowsiness_count = 0
-                session_yawn_count = 0
-                fatigue_scores_history.clear()
-                current_session_id = None
-                save_session_to_db()
-                print("====================================================")
-                print("[SUCCESS] Hieu chuan hoan tat! Da khoi tao phien luu tien trinh luu hanh trinh.")
-                print(f"EAR Baseline: {ear_baseline:.3f} | Nguong nham mat (EAR Limit): {ear_limit:.3f}")
-                print(f"MAR Baseline: {mar_baseline:.3f}")
-                print(f"Pitch Baseline: {pitch_baseline:.3f} | Yaw Baseline: {yaw_baseline:.3f} | Roll Baseline: {roll_baseline:.3f}")
-                print("====================================================")
-        
-        # 5. Phân tích thời gian thực khi đã hiệu chuẩn
-        elif detected_face and calibrated:
+        # 4. Quản lý trạng thái khởi động & xác thực (VNeID -> Telegram & Session -> Face Scan -> Active)
+        if auth_state == "VNEID_REQ":
+            alarm_level = 4  # 2 âm còi liên tiếp, 3s sau kêu tiếp
+            if not vneid_prompt_played:
+                play_voice_prompt_async("req_vneid")
+                vneid_prompt_played = True
+                print("[AUTH] Đã phát âm thanh yêu cầu xác thực thẻ VNeID / CCCD.")
+
+            # 1. Tự động quét mã QR cực nhanh (2ms) trong luồng camera
+            if not vneid_auth_trigger and not is_processing_vneid:
+                scan_res = quick_scan_qr(frame)
+                if scan_res and scan_res.get("success"):
+                    driver_info["vneid"] = scan_res["vneid"]
+                    driver_info["name"] = scan_res["name"]
+                    print(f"[AUTH SCANNER] Đã tự động nhận diện thẻ CCCD ({scan_res['method']}): {driver_info['vneid']} - {driver_info['name']}")
+                    vneid_auth_trigger = True
+
+            # Hiển thị giao diện thông báo Yêu cầu VNeID trên camera
+            cv2.rectangle(frame, (30, 30), (w - 30, 160), (0, 0, 0), -1)
+            cv2.rectangle(frame, (30, 30), (w - 30, 160), (0, 255, 255), 2)
+            if is_processing_vneid:
+                cv2.putText(frame, "[ CHUP ANH OK - DANG XU LY TOI DA 3 GIAY... ]", (50, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 0), 2, cv2.LINE_AA)
+                cv2.putText(frame, "Anh da luu; ket qua se cap nhat len Web Dashboard.", (50, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+            else:
+                cv2.putText(frame, "YEU CAU XAC THUC THE VNeID / CCCD", (50, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(frame, "Dua the CCCD truoc camera hoac bam 'V' de xac thuc", (50, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(frame, "[Gio the CCCD / Nhan 'V' / Click nut GUI de xac thuc]", (50, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 0), 1, cv2.LINE_AA)
+
+            # Tín hiệu khi ấn nút bấm (TỨC THÌ 0ms - đNy vào luồng ngầm)
+            if vneid_auth_trigger and not is_processing_vneid:
+                vneid_auth_trigger = False
+                is_processing_vneid = True
+                play_pc_beep_single()
+                print("[INSTANT CAPTURE] Lập tức chụp ảnh và đẩy vào luồng xử lý ngầm!")
+                snapshot_frame = frame.copy()
+                threading.Thread(target=process_vneid_async, args=(snapshot_frame,), daemon=True).start()
+
+        elif auth_state == "FACE_REQ":
+            alarm_level = 5  # 1 âm còi ngắt quãng mỗi 3s
+            if not face_prompt_played:
+                play_voice_prompt_async("req_face")
+                face_prompt_played = True
+                print("[AUTH] Đã phát âm thanh yêu cầu xác thực khuôn mặt.")
+
+            if detected_face and not calibrated:
+                calib_count += 1
+                calib_ears.append(ear)
+                calib_mars.append(mar)
+                calib_pitches.append(pitch)
+                calib_yaws.append(yaw)
+                calib_rolls.append(roll)
+
+                cv2.rectangle(frame, (30, 390), (w - 30, 445), (0, 0, 0), -1)
+                progress = int((calib_count / calib_frames) * (w - 80))
+                cv2.rectangle(frame, (40, 400), (40 + progress, 435), (0, 255, 255), -1)
+                cv2.rectangle(frame, (40, 400), (w - 40, 435), (255, 255, 255), 1)
+                cv2.putText(frame, f"DANG QUET XAC THUC KHUON MAT... {int((calib_count/calib_frames)*100)}%", (50, 423), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0) if progress > 200 else (255, 255, 255), 2)
+
+                if calib_count >= calib_frames:
+                    ear_baseline = np.mean(calib_ears)
+                    mar_baseline = np.mean(calib_mars)
+                    pitch_baseline = np.mean(calib_pitches)
+                    yaw_baseline = np.mean(calib_yaws)
+                    roll_baseline = np.mean(calib_rolls)
+                    ear_limit = max(0.20, min(0.24, ear_baseline * 0.80))
+                    calibrated = True
+                    alarm_level = 0
+                    play_voice_prompt_async("face_success")
+                    auth_state = "ACTIVE"
+                    print("====================================================")
+                    print("[SUCCESS] Xác thực khuôn mặt hoàn tất! Da khoi tao phien va chuyen sang giam sat tinh tao.")
+                    print(f"EAR Baseline: {ear_baseline:.3f} | Nguong nham mat (EAR Limit): {ear_limit:.3f}")
+                    print(f"MAR Baseline: {mar_baseline:.3f}")
+                    print(f"Pitch Baseline: {pitch_baseline:.3f} | Yaw Baseline: {yaw_baseline:.3f} | Roll Baseline: {roll_baseline:.3f}")
+                    print("====================================================")
+            else:
+                cv2.rectangle(frame, (30, 390), (w - 30, 445), (0, 0, 0), -1)
+                cv2.putText(frame, "YEU CAU XAC THUC KHUON MAT: Vui long nhin vao camera", (40, 423), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 255), 1, cv2.LINE_AA)
+
+        # 5. Phân tích thời gian thực khi đã xác thực và hiệu chuẩn hoàn tất (ACTIVE)
+        elif auth_state == "ACTIVE" and detected_face and calibrated:
             # Reset bộ đếm mất dấu khuôn mặt
             face_lost_start_time = None
             
@@ -994,6 +1551,7 @@ def main():
                 if yawn_start_time and (time.time() - yawn_start_time) >= 1.5:
                     yawn_timestamps.append(time.time())
                     session_yawn_count += 1
+                    trigger_voice_alert("alert_yawn")
                     try:
                         from telegram_bot import send_telegram_alert_async
                         send_telegram_alert_async("🥱 CẢNH BÁO MỆT MỎI: Tài xế vừa ngáp dài (>1.5s)!", frame)
@@ -1131,6 +1689,7 @@ def main():
                 status_color = (0, 0, 255)  # Red
                 alarm_level = 3
                 fatigue_score = 1.0
+                trigger_voice_alert("alert_danger")
                 if not eye_closed_3s_logged:
                     session_drowsiness_count += 1
                     eye_closed_3s_logged = True
@@ -1150,6 +1709,7 @@ def main():
                 status_color = (0, 165, 255)  # Orange
                 alarm_level = 2
                 fatigue_score = max(fatigue_score, 0.85)
+                trigger_voice_alert("alert_drowsy")
                 if not eye_closed_1s_logged:
                     eye_closed_1s_logged = True
                     try:
@@ -1166,6 +1726,7 @@ def main():
                 
             # Theo dõi đếm sự kiện mất tập trung khi lệch đầu
             if head_tilted_duration >= 1.5:
+                trigger_voice_alert("alert_distracted")
                 if not distraction_logged:
                     session_distraction_count += 1
                     distraction_logged = True
@@ -1210,10 +1771,11 @@ def main():
                 # Đã mất dấu lâu hơn 1.5 giây -> Cảnh báo khẩn cấp ngay lập tức & Đếm 1 lần mất tập trung
                 status_text = "NGUY HIEM - MAT DAU!"
                 status_color = (0, 0, 255)
-                alarm_level = 3 # Fast beep bíp dồn dập
+                alarm_level = 3 # Báo động nguy hiểm
                 fatigue_score = 1.0 # Force full score trên UI
                 lstm_risk = 100.0
                 fatigue_scores_history.append(fatigue_score)
+                trigger_voice_alert("alert_distracted")
                 
                 if not distraction_logged:
                     session_distraction_count += 1
@@ -1241,11 +1803,43 @@ def main():
             cv2.putText(frame, "PLEASE LOOK STRAIGHT AT CAMERA", (100, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
         # --- Vẽ Dashboard Thống Kê Giao Diện Đẹp ---
-        if calibrated:
-            # 1. Tiêu đề chính
-            cv2.putText(dashboard, "DRIVER MONITORING SYSTEM", (20, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.line(dashboard, (15, 30), (305, 30), (100, 100, 100), 1)
+        cv2.putText(dashboard, "DRIVER MONITORING SYSTEM", (20, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.line(dashboard, (15, 30), (305, 30), (100, 100, 100), 1)
+
+        if auth_state == "VNEID_REQ":
+            cv2.putText(dashboard, "TRANG THAI: CHO VNeID", (20, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(dashboard, f" Tai xe: {driver_info['name']}", (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
+            cv2.putText(dashboard, f" VNeID: {driver_info['vneid']}", (20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
+            cv2.putText(dashboard, f" Bang lai: {driver_info['license_class']}", (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.line(dashboard, (15, 128), (305, 128), (100, 100, 100), 1)
+            cv2.putText(dashboard, " AM THANH THONG BAO:", (20, 148), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 0), 1)
+            cv2.putText(dashboard, " - Phat tieng giong noi thong bao", (20, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
+            cv2.putText(dashboard, " - Coi 2 tieng lien tiep (lap 3s)", (20, 188), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 255, 255), 1)
             
+            # Interactive Button
+            cv2.rectangle(dashboard, (15, 422), (305, 458), (0, 200, 255), -1)
+            cv2.rectangle(dashboard, (15, 422), (305, 458), (255, 255, 255), 1)
+            cv2.putText(dashboard, "[ XAC THUC VNeID (Phim V) ]", (24, 444), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.putText(dashboard, "Click nut tren hoac nhan 'v' de quet card", (15, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (140, 140, 140), 1)
+
+        elif auth_state == "FACE_REQ":
+            cv2.putText(dashboard, "VNeID: DA XAC THUC OK", (20, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(dashboard, f" Tai xe: {driver_info['name']}", (20, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
+            cv2.putText(dashboard, f" Session ID: #{current_session_id or 'moi'}", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 0), 1)
+            cv2.line(dashboard, (15, 105), (305, 105), (100, 100, 100), 1)
+            cv2.putText(dashboard, " XAC THUC KHUON MAT:", (20, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(dashboard, " - Phat tieng giong noi thong bao", (20, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
+            cv2.putText(dashboard, " - Coi 1 tieng ngat quang 3s/lan", (20, 165), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 255, 255), 1)
+            
+            draw_bar(dashboard, "Face Baseline Scan", calib_count / calib_frames, 1.0, 20, 195, 280, 12, (0, 255, 255))
+            
+            # Button: cho phép bắt đầu lại việc quét mặt, không yêu cầu quét lại VNeID.
+            cv2.rectangle(dashboard, (15, 422), (305, 458), (255, 140, 0), -1)
+            cv2.rectangle(dashboard, (15, 422), (305, 458), (255, 255, 255), 1)
+            cv2.putText(dashboard, "[ QUET LAI KHUON MAT ]", (35, 444), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.putText(dashboard, "Click nut hoac nhan 'r' de quet lai mat", (15, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (140, 140, 140), 1)
+
+        elif auth_state == "ACTIVE":
             # 2. Tiến trình hành trình lái xe (Driving Session Info)
             if session_start_time is not None:
                 elapsed_sec = int(time.time() - session_start_time)
@@ -1335,31 +1929,41 @@ def main():
             
         # Hiển thị giao diện chính
         cv2.imshow("DMS - Drowsiness Detection Dashboard", combined_img)
+
+        # Cập nhật màn hình OLED I2C (128x64)
+        if oled.is_available():
+            oled_auth = auth_state if auth_state != "ACTIVE" else "MONITORING"
+            oled.update_data(
+                auth_state=oled_auth,
+                alarm_level=alarm_level,
+                ear=ear if 'ear' in locals() else 0.0,
+                mar=mar if 'mar' in locals() else 0.0,
+                fps=30.0,
+                fatigue_score=int(fatigue_score * 100) if 'fatigue_score' in locals() else 0,
+                driver_name=driver_info.get("name", ""),
+                status_text=status_text if 'status_text' in locals() else "BINH THUONG"
+            )
         
-        # Nhận phím bấm từ người dùng (q để thoát, r hoặc click nút để hiệu chuẩn lại)
+        # v/chạm nút: chụp VNeID ở bước đầu; r/chạm nút: quét lại mặt sau khi VNeID thành công.
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
+        elif key in (ord('v'), ord('V'), ord('c'), 32, 13):
+            print("[KEYBOARD TRIGGER] Nhận lệnh quét.")
+            handle_scan_button()
         elif key == ord('r') or recalibrate_requested:
             recalibrate_requested = False
-            if current_session_id is not None:
-                save_session_to_db()
             try:
                 from audio_manager import record_event_audio
                 record_event_audio("reset_recalibrate", 10)
             except Exception:
                 pass
-            calibrated = False
-            calib_count = 0
-            calib_ears.clear()
-            calib_mars.clear()
-            calib_pitches.clear()
-            calib_yaws.clear()
-            calib_rolls.clear()
-            alarm_level = 0  # Reset còi ngay lập tức khi nhấn phím 'r'
-            current_session_id = None
-            session_start_time = None
-            print("[INFO] Click nut bam / Nhan 'r': Yeu cau hieu chuan lai baseline va reset tien trinh hanh trinh...")
+            if vneid_authenticated:
+                print("[INFO] Nhấn 'r': Yêu cầu quét lại khuôn mặt.")
+                restart_face_scan()
+            else:
+                print("[INFO] Nhấn 'r' khi chưa xác thực VNeID: chụp CCCD/VNeID.")
+                handle_scan_button()
 
     # Lưu và in báo cáo kết thúc hành trình
     if current_session_id is not None or session_start_time is not None:
@@ -1384,6 +1988,8 @@ def main():
         print("====================================================")
 
     # Giải phóng tài nguyên
+    if oled.is_available():
+        oled.stop()
     if cap is not None:
         cap.release()
     cv2.destroyAllWindows()

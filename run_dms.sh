@@ -97,6 +97,61 @@ if command -v v4l2-ctl >/dev/null 2>&1; then
     fi
 fi
 
+# Kiểm tra và tự động tạo các file âm thanh giọng nói thông báo nếu chưa có
+if [ ! -f "audio_prompts/req_vneid.mp3" ] || [ ! -f "audio_prompts/beep_double.wav" ]; then
+    echo "[INFO] Dang tao cac file thong bao am thanh va coi bíp..."
+    venv/bin/python3 -c "
+import os, wave, struct, math
+from gtts import gTTS
+os.makedirs('audio_prompts', exist_ok=True)
+prompts = {
+    'req_vneid.mp3': 'Vui lòng quét thẻ VNeID hoặc căn cước công dân để xác thực người lái.',
+    'vneid_success.mp3': 'Xác thực VNeID thành công.',
+    'req_face.mp3': 'Vui lòng nhìn thẳng vào camera để xác thực khuôn mặt.',
+    'face_success.mp3': 'Xác thực khuôn mặt thành công. Chúc bạn lái xe an toàn.',
+    'alert_drowsy.mp3': 'Cảnh báo! Bạn đang có dấu hiệu buồn ngủ, vui lòng tập trung lái xe.',
+    'alert_danger.mp3': 'Nguy hiểm! Phát hiện ngủ gật, hãy dừng xe ngay lập tức!',
+    'alert_distracted.mp3': 'Cảnh báo! Vui lòng chú ý quan sát phía trước.',
+    'alert_yawn.mp3': 'Bạn đang có dấu hiệu mệt mỏi, hãy giữ tỉnh táo.'
+}
+for fname, text in prompts.items():
+    p = os.path.join('audio_prompts', fname)
+    if not os.path.exists(p):
+        try:
+            gTTS(text=text, lang='vi').save(p)
+        except Exception:
+            pass
+
+sample_rate = 44100
+freq = 1000.0
+def make_tone_pcm(d):
+    ns = int(sample_rate*d)
+    b = bytearray()
+    for i in range(ns):
+        b.extend(struct.pack('<h', int(16000*math.sin(2*math.pi*freq*(i/sample_rate)))))
+    return b
+
+def make_sil_pcm(d): return bytearray(int(sample_rate*d)*2)
+
+if not os.path.exists('audio_prompts/beep_double.wav'):
+    d = make_tone_pcm(0.10) + make_sil_pcm(0.10) + make_tone_pcm(0.10)
+    with wave.open('audio_prompts/beep_double.wav', 'w') as f:
+        f.setnchannels(1); f.setsampwidth(2); f.setframerate(sample_rate); f.writeframes(d)
+
+if not os.path.exists('audio_prompts/beep_single.wav'):
+    d = make_tone_pcm(0.15)
+    with wave.open('audio_prompts/beep_single.wav', 'w') as f:
+        f.setnchannels(1); f.setsampwidth(2); f.setframerate(sample_rate); f.writeframes(d)
+"
+fi
+
+# Tự động mở âm lượng 100% cho Loa (Jack 3.5mm ALSA / PulseAudio)
+echo "[INFO] Dang cau hinh am luong loa 100%..."
+amixer -c 0 sset Headphone 100% unmute >/dev/null 2>&1 || true
+amixer sset Master 100% unmute >/dev/null 2>&1 || true
+pactl set-sink-mute 0 0 >/dev/null 2>&1 || true
+pactl set-sink-volume 0 100% >/dev/null 2>&1 || true
+
 # Run the program
 echo "[INFO] Starting Driver Monitoring System..."
 if [ "$IS_USB_CAM" = true ]; then

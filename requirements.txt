@@ -2,3 +2,13 @@ opencv-python
 mediapipe
 numpy
 torch
+gtts
+pygame
+sounddevice
+requests
+Flask
+Pillow
+pyzbar
+pytesseract
+
+
