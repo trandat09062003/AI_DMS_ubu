@@ -135,6 +135,14 @@ AI_DMS/
 | | **IN (Signal)** | **GPIO 17** | **Pin 11** | Tín hiệu kích hoạt rung |
 | **Nút Bấm Hiệu Chuẩn**| **Chân 1** | **GPIO 22** | **Pin 15** | Kéo lên nội trở (Pull-up) |
 | *(Calibrate Button)*| **Chân 2** | Nối Đất (Ground) | **Pin 14** (hoặc Pin 9) | Khi bấm nút chân 1 nối GND |
+| **Đầu Đọc Thẻ RFID** | **VCC (3.3V)** | Nguồn 3.3V | **Pin 1** (hoặc Pin 17) | **CẤP 3.3V, KHÔNG CẮM 5V** |
+| *(RC522 SPI)* | **RST** | **GPIO 25** | **Pin 22** | Chân Reset phần cứng |
+| | **GND** | Nối Đất (Ground) | **Pin 6** (hoặc Pin 25, 30)| Cực âm chung |
+| | **MISO / SDO** | **GPIO 9** (SPI0 MISO) | **Pin 21** | Dữ liệu SPI Master In Slave Out |
+| | **MOSI / SDI** | **GPIO 10** (SPI0 MOSI) | **Pin 19** | Dữ liệu SPI Master Out Slave In |
+| | **SCK / SCLK** | **GPIO 11** (SPI0 SCLK) | **Pin 23** | Xung nhịp SPI Clock |
+| | **SDA / NSS** | **GPIO 8** (SPI0 CE0) | **Pin 24** | Chân chọn chip Chip Select 0 |
+| | **IRQ** | *(Không nối)* | *(Bỏ trống)* | Không sử dụng |
 | **Ngõ Ra Loa** | **Jack 3.5mm** | Cổng Jack 3.5mm Pi | Cổng tròn 3.5mm | Xuất âm thanh ra mạch TDA2050 |
 | **Camera & Micro** | **Cáp USB** | Cổng USB 3.0/2.0 | Cổng USB trên Pi | Cắm trực tiếp cổng USB |
 
@@ -408,12 +416,12 @@ Hệ thống hỗ trợ gửi ngay ảnh chụp khuôn mặt và file ghi âm ca
 
 Giao diện Web Dashboard gồm 6 tab chức năng chính:
 
-* 📊 **Tab 1: Báo Cáo Chuyến Đi (Driving Sessions)**: Quản lý danh sách hành trình, thời lượng, số lần vi phạm, điểm mệt mỏi và xuất file báo cáo CSV.
-* 🪪 **Tab 2: Xác Thực VNeID / CCCD**: Xác thực tài xế nhanh từ điện thoại, upload ảnh CCCD hoặc nhập thông tin thủ công.
-* 🎙️ **Tab 3: Ghi Âm Khoang Lái (Audio Logs)**: Nghe lại trực tiếp các file ghi âm cảnh báo và nút test thu âm micro 10 giây.
-* 📶 **Tab 4: Quản Lý Wi-Fi**: Quét các mạng Wi-Fi lân cận và nhập mật khẩu kết nối 1-click mà không cần cắm chuột bàn phím.
-* 🤖 **Tab 5: Cấu Hình Telegram Bot**: Bật/tắt cảnh báo, cài đặt Token & Chat ID và gửi tin nhắn thử nghiệm.
-* 🧪 **Tab 6: Kiểm Tra Phần Cứng (Hardware Test)**: Bấm nút test còi Bíp, rung motor, loa giọng nói Tiếng Việt và màn hình OLED.
+* 📊 **Tab 1: Báo Cáo Chuyến Đi (Driving Sessions)**: Quản lý danh sách hành trình, hiển thị rõ ràng thông tin người lái xe (Lái xe 1, 2, 3, Người lạ hoặc tên người được xác minh), thời lượng, số lần vi phạm, điểm mệt mỏi và xuất file báo cáo CSV.
+* 🪪 **Tab 2: Xác Thực VNeID / CCCD**: Xác thực tài xế nhanh 1-Click (Lái xe 1, 2, 3), chụp/tải ảnh thẻ CCCD để AI OCR tự động trích xuất hoặc nhập thông tin thủ công (không còn popup phiền toái).
+* 🎵 **Tab 3: Ghi Âm Khoang Lái (Audio Logs)** *(Dành cho Admin)*: Nghe lại trực tiếp các file ghi âm cabin 10s và nút test thu âm micro.
+* ✈️ **Tab 4: Cấu Hình Telegram Bot** *(Dành cho Admin)*: Bật/tắt cảnh báo, cài đặt Token & Chat ID và gửi tin nhắn thử nghiệm.
+* 📡 **Tab 5: Quản Lý Wi-Fi**: Quét các mạng Wi-Fi lân cận và nhập mật khẩu kết nối 1-click mà không cần cắm chuột bàn phím.
+* 👥 **Tab 6: Phân Quyền Tài Khoản (1-8)** *(Dành cho Admin)*: Quản lý và phân quyền vai trò **Admin** (Toàn quyền) hoặc **Lái xe** (Xem chuyến đi & xác thực lái xe) cho tất cả 8 tài khoản (Tài khoản 1 đến 8).
 
 ---
 

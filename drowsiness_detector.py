@@ -33,10 +33,25 @@ from audio_manager import (
     is_voice_prompt_playing
 )
 from oled_manager import get_oled_manager
+from rfid_manager import RFIDManager
+
+# Tích hợp bộ giải mã CCCD & VNeID tối ưu Verify_Inf
+import sys
+VERIFY_INF_PATH = "/home/kata/Documents/Verify_Inf"
+if VERIFY_INF_PATH not in sys.path:
+    sys.path.insert(0, VERIFY_INF_PATH)
+
+try:
+    from core.verifier import IdentityVerifier
+    cccd_verifier = IdentityVerifier()
+    print("[INFO] Verify_Inf IdentityVerifier (WeChatQRCode CNN + CLAHE OCR) đã sẵn sàng.")
+except Exception as e_inf:
+    cccd_verifier = None
+    print(f"[WARN] Không thể nạp Verify_Inf IdentityVerifier: {e_inf}")
 
 driver_info = {
-    "name": "[Chưa xác định - Xem ảnh đính kèm]",
-    "vneid": "[Chưa đọc được - Xem ảnh đính kèm]",
+    "name": "Chưa xác thực",
+    "vneid": "Không xác định",
     "license_class": "B2"
 }
 fatigue_scores_history = []
@@ -226,9 +241,25 @@ def alarm_worker():
 
 
 def quick_scan_qr(frame):
-    """Quét cực nhanh mã QR trên frame gốc trong luồng chính (chỉ mất ~2ms)"""
+    """Quét cực nhanh mã QR trên frame gốc bằng WeChatQRCode CNN / PyZbar (chỉ mất ~70ms)"""
     if frame is None:
         return None
+    if cccd_verifier is not None:
+        try:
+            res = cccd_verifier.verify(frame, try_ocr=False)
+            if res.get("success") and res.get("vneid"):
+                return {
+                    "success": True,
+                    "vneid": res["vneid"],
+                    "name": res.get("name") or "Tài Xế",
+                    "license_class": res.get("license_class", "B2"),
+                    "method": res.get("method", "WECHAT_QRCODE"),
+                    "points": res.get("qr_points")
+                }
+        except Exception:
+            pass
+
+    # Fallback pyzbar
     try:
         import pyzbar.pyzbar as pyzbar
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -289,12 +320,30 @@ def extract_info_from_ocr_text(text):
 
 def scan_cccd_or_vneid(frame, deadline=None):
     """
-    Nhận diện đa tầng: Mã QR siêu tốc + AI OCR Tiếng Việt (Tesseract vie+eng) đọc trực tiếp chữ trên thẻ
+    Nhận diện đa tầng tối ưu với Verify_Inf: WeChatQRCode + Nắn góc Perspective 4 điểm + Tiền xử lý CLAHE OCR
     """
     if frame is None:
         return None
 
-    # --- TẦNG 1: QUÉT MÃ QR (PyZbar & OpenCV) ---
+    if cccd_verifier is not None:
+        try:
+            res = cccd_verifier.verify(frame, try_ocr=True)
+            if res.get("success") and (res.get("vneid") or res.get("name")):
+                vneid_res = res.get("vneid") or "079203001234"
+                name_res = res.get("name") or "Nguyễn Văn A"
+                lic_res = res.get("license_class") or "B2"
+                print(f"[VERIFY_INF SUCCESS] Nhận diện thành công ({res.get('method')} - {res.get('latency_ms')}ms): {name_res} ({vneid_res}) - Hạng: {lic_res}")
+                return {
+                    "success": True,
+                    "vneid": vneid_res,
+                    "name": name_res,
+                    "license_class": lic_res,
+                    "method": res.get("method", "VERIFY_INF")
+                }
+        except Exception as e_inf:
+            print(f"[VERIFY_INF WARN] {e_inf}")
+
+    # Fallback Tầng 1: PyZbar & OpenCV
     try:
         import pyzbar.pyzbar as pyzbar
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
@@ -313,86 +362,6 @@ def scan_cccd_or_vneid(frame, deadline=None):
                 }
     except Exception:
         pass
-
-    try:
-        qr_detector = cv2.QRCodeDetector()
-        qr_text, points, _ = qr_detector.detectAndDecode(frame)
-        if qr_text:
-            parts = qr_text.split('|')
-            vneid_num = parts[0].strip() if len(parts) >= 1 else qr_text
-            name_str = parts[2].strip() if len(parts) >= 3 else "Nguyễn Văn A"
-            return {
-                "success": True,
-                "vneid": vneid_num,
-                "name": name_str,
-                "method": "OPENCV_QR"
-            }
-    except Exception:
-        pass
-
-    # --- TẦNG 2: AI OCR ĐỌC CHỮ TIẾNG VIỆT & CHỮ SỐ TRÊN THẺ (Tesseract vie+eng) ---
-    try:
-        import pytesseract
-
-        def remaining_seconds():
-            return None if deadline is None else deadline - time.monotonic()
-
-        if deadline is not None and remaining_seconds() <= 0:
-            return None
-        
-        # Tiền xử lý ảnh nâng cao (Enhanced Preprocessing)
-        h, w = frame.shape[:2]
-        proc_img = frame.copy()
-        if w < 1000:
-            scale_f = 1000.0 / w
-            proc_img = cv2.resize(proc_img, (int(w * scale_f), int(h * scale_f)), interpolation=cv2.INTER_CUBIC)
-            
-        gray_img = cv2.cvtColor(proc_img, cv2.COLOR_BGR2GRAY) if len(proc_img.shape) == 3 else proc_img
-        
-        # Tăng cường độ tương phản (CLAHE)
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray_img)
-        
-        # Lọc làm sắc nét chữ
-        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-        sharpened = cv2.filter2D(enhanced, -1, kernel)
-        
-        # Chạy OCR trên ảnh sắc nét
-        ocr_timeout = max(0.1, remaining_seconds()) if deadline is not None else 3
-        ocr_text = pytesseract.image_to_string(
-            sharpened, lang='vie+eng', config='--psm 6', timeout=ocr_timeout
-        )
-        info = extract_info_from_ocr_text(ocr_text)
-        
-        # Nếu chưa tìm thấy đủ số CCCD, thử chạy tiếp trên ảnh nhị phân Otsu
-        if 'vneid' not in info and (deadline is None or remaining_seconds() > 0.35):
-            _, thresh = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            ocr_timeout = max(0.1, remaining_seconds()) if deadline is not None else 3
-            ocr_text_otsu = pytesseract.image_to_string(
-                thresh, lang='vie+eng', config='--psm 6', timeout=ocr_timeout
-            )
-            info_otsu = extract_info_from_ocr_text(ocr_text_otsu)
-            if 'vneid' in info_otsu:
-                info['vneid'] = info_otsu['vneid']
-            if 'name' not in info and 'name' in info_otsu:
-                info['name'] = info_otsu['name']
-
-        if info and ('vneid' in info or 'name' in info):
-            vneid_res = info.get('vneid', '079203001234')
-            name_res = info.get('name', 'Nguyễn Văn A')
-            lic_res = info.get('license_class', 'B2')
-            print(f"[AI OCR SUCCESS] Trích xuất thành công từ ảnh: {name_res} ({vneid_res}) - Hạng: {lic_res}")
-            return {
-                "success": True,
-                "vneid": vneid_res,
-                "name": name_res,
-                "license_class": lic_res,
-                "method": "AI_OCR_TESSERACT"
-            }
-    except Exception as e_ocr:
-        print(f"[AI OCR ERROR] {e_ocr}")
-
-    return None
 
 
 def _scan_vneid_worker(snapshot_frame, result_pipe, timeout_seconds):
@@ -439,13 +408,28 @@ def scan_vneid_with_timeout(snapshot_frame, timeout_seconds=VNEID_PROCESSING_TIM
         worker.join(timeout=0.2)
         receive_pipe.close()
 
+def trigger_driver_verified_beep():
+    """Phát 1 tiếng còi pip khi xác minh thông tin lái xe thành công (Buzzer vật lý GPIO 27 + Loa)"""
+    def _pip_job():
+        if GPIO_AVAILABLE:
+            try:
+                GPIO.output(BUZZER_PIN, GPIO.HIGH)
+                time.sleep(0.15)
+                GPIO.output(BUZZER_PIN, GPIO.LOW)
+            except Exception:
+                pass
+        try:
+            play_pc_beep_single(force=True)
+        except Exception:
+            pass
+    threading.Thread(target=_pip_job, daemon=True).start()
+
 def process_vneid_async(snapshot_frame, verified_driver=None):
     """
-    Tạo phiên lái xe sau khi xác thực CCCD/VNeID.
-
-    ``verified_driver`` được truyền từ Web Dashboard khi người dùng đã xác thực
-    trên web. Trường hợp đó không OCR lại khung hình camera, mà chuyển thẳng
-    sang bước xác thực khuôn mặt.
+    Tạo phiên lái xe sau khi xác minh thông tin lái xe qua 3 cách:
+    1. Ấn nút nhấn để scan giấy tờ cá nhân (CCCD / Bằng lái xe)
+    2. Xác minh trên Web Dashboard
+    3. Quẹt thẻ RFID RC522
     """
     global is_processing_vneid, auth_state, vneid_authenticated, driver_info
     global session_start_time, session_start_str, session_distraction_count, session_drowsiness_count, session_yawn_count, current_session_id, fatigue_scores_history
@@ -453,42 +437,141 @@ def process_vneid_async(snapshot_frame, verified_driver=None):
     try:
         now_stamp = time.strftime('%Y%m%d_%H%M%S')
         now_str = time.strftime('%Y-%m-%d %H:%M:%S')
-        authenticated_from_web = verified_driver is not None
+        authenticated_from_source = verified_driver is not None
 
-        if authenticated_from_web:
+        if authenticated_from_source:
             driver_info["name"] = verified_driver.get("name", driver_info["name"])
             driver_info["vneid"] = verified_driver.get("vneid", driver_info["vneid"])
             driver_info["license_class"] = verified_driver.get("license_class", driver_info["license_class"])
-            print(f"[AUTH WEB] Đã xác thực trên web: {driver_info['name']} ({driver_info['vneid']}); chuyển thẳng sang quét mặt.")
+            src_method = verified_driver.get("method", "WEB/RFID")
+            print(f"[AUTH VERIFIED] Xác minh thành công qua {src_method}: {driver_info['name']} ({driver_info['vneid']}) - Hạng: {driver_info['license_class']}")
+            try:
+                import json
+                scan_auth_info = {
+                    "timestamp": now_str,
+                    "timestamp_epoch": time.time(),
+                    "image_url": verified_driver.get("image_url") or "/audio_logs/latest_cccd_snapshot.jpg",
+                    "status": "SUCCESS",
+                    "success": True,
+                    "name": driver_info["name"],
+                    "vneid": driver_info["vneid"],
+                    "license_class": driver_info["license_class"],
+                    "method": src_method,
+                    "message": f"Đã xác minh qua {src_method}: {driver_info['name']}"
+                }
+                tmp_json = "/tmp/dms_latest_card_scan.json.tmp"
+                with open(tmp_json, "w") as f:
+                    json.dump(scan_auth_info, f)
+                os.replace(tmp_json, "/tmp/dms_latest_card_scan.json")
+            except Exception:
+                pass
         else:
-            # Lưu ngay sau khi chụp để không mất bằng chứng nếu OCR hết thời gian.
+            # Lưu ảnh chụp khi ấn nút nhấn scan giấy tờ
             cccd_img_path = os.path.join(AUDIO_DIR, f"cccd_snapshot_{now_stamp}.jpg")
+            latest_cccd_path = os.path.join(AUDIO_DIR, "latest_cccd_snapshot.jpg")
             try:
                 cv2.imwrite(cccd_img_path, snapshot_frame)
+                cv2.imwrite(latest_cccd_path, snapshot_frame)
                 os.chmod(cccd_img_path, 0o666)
-                print(f"[IMAGE SUCCESS] Đã lưu ảnh chụp thẻ CCCD: {cccd_img_path}")
+                os.chmod(latest_cccd_path, 0o666)
+                print(f"[IMAGE SUCCESS] Đã lưu ảnh chụp giấy tờ cá nhân: {cccd_img_path}")
             except Exception as e:
                 print(f"[IMAGE ERROR] {e}")
 
-            print(f"[AUTH THREAD] Xử lý QR/OCR tối đa {VNEID_PROCESSING_TIMEOUT_SECONDS:.0f}s...")
+            # Đẩy trạng thái & ảnh chụp lên Web Dashboard ngay lập tức
+            try:
+                import json
+                scan_init_info = {
+                    "timestamp": now_str,
+                    "timestamp_epoch": time.time(),
+                    "image_url": f"/audio_logs/cccd_snapshot_{now_stamp}.jpg",
+                    "image_filename": f"cccd_snapshot_{now_stamp}.jpg",
+                    "status": "PROCESSING",
+                    "success": False,
+                    "name": "",
+                    "vneid": "",
+                    "license_class": "",
+                    "method": "CAMERA_BUTTON",
+                    "message": "Đang chạy AI OCR bóc tách giấy tờ từ ảnh chụp..."
+                }
+                tmp_json = "/tmp/dms_latest_card_scan.json.tmp"
+                with open(tmp_json, "w") as f:
+                    json.dump(scan_init_info, f)
+                os.replace(tmp_json, "/tmp/dms_latest_card_scan.json")
+            except Exception as e_json:
+                print(f"[AUTH JSON WARN] {e_json}")
+
+            print(f"[AUTH THREAD] Đang xử lý AI OCR bóc tách giấy tờ tối đa {VNEID_PROCESSING_TIMEOUT_SECONDS:.0f}s...")
             scan_res = scan_vneid_with_timeout(snapshot_frame)
-            if scan_res and scan_res.get("success"):
-                driver_info["vneid"] = scan_res["vneid"]
-                driver_info["name"] = scan_res["name"]
+            if scan_res and scan_res.get("success") and (scan_res.get("name") or scan_res.get("vneid")):
+                driver_info["vneid"] = scan_res.get("vneid") or "Không xác định"
+                driver_info["name"] = scan_res.get("name") or "Người lạ"
                 driver_info["license_class"] = scan_res.get("license_class", driver_info["license_class"])
-                print(f"[AUTH THREAD] Nhận diện thành công ({scan_res['method']}): {driver_info['name']} - {driver_info['vneid']}")
+                print(f"[AUTH THREAD] Nhận diện giấy tờ thành công ({scan_res.get('method', 'CAMERA_OCR')}): {driver_info['name']} - {driver_info['vneid']} - Hạng: {driver_info['license_class']}")
+                try:
+                    import json
+                    scan_succ_info = {
+                        "timestamp": now_str,
+                        "timestamp_epoch": time.time(),
+                        "image_url": f"/audio_logs/cccd_snapshot_{now_stamp}.jpg",
+                        "image_filename": f"cccd_snapshot_{now_stamp}.jpg",
+                        "status": "SUCCESS",
+                        "success": True,
+                        "name": driver_info["name"],
+                        "vneid": driver_info["vneid"],
+                        "license_class": driver_info["license_class"],
+                        "method": scan_res.get("method", "CAMERA_OCR"),
+                        "message": f"Nhận diện thành công: {driver_info['name']} (CCCD: {driver_info['vneid']})"
+                    }
+                    tmp_json = "/tmp/dms_latest_card_scan.json.tmp"
+                    with open(tmp_json, "w") as f:
+                        json.dump(scan_succ_info, f)
+                    os.replace(tmp_json, "/tmp/dms_latest_card_scan.json")
+                except Exception:
+                    pass
+            else:
+                # Không OCR được khi ấn nút -> Tự động nhận diện là "Người lạ", KHÔNG bắt xác nhận trên web!
+                driver_info["name"] = "Người lạ"
+                driver_info["vneid"] = "Không xác định"
+                driver_info["license_class"] = "B2"
+                print(f"[AUTH THREAD] Không OCR được CCCD khi ấn nút -> Tự động nhận diện là 'Người lạ' và chuyển sang bước tiếp theo.")
+                try:
+                    import json
+                    scan_succ_info = {
+                        "timestamp": now_str,
+                        "timestamp_epoch": time.time(),
+                        "image_url": f"/audio_logs/cccd_snapshot_{now_stamp}.jpg",
+                        "image_filename": f"cccd_snapshot_{now_stamp}.jpg",
+                        "status": "SUCCESS",
+                        "success": True,
+                        "name": "Người lạ",
+                        "vneid": "Không xác định",
+                        "license_class": "B2",
+                        "method": "BUTTON_UNKNOWN",
+                        "message": "Không OCR được CCCD -> Đã nhận dạng: Người lạ"
+                    }
+                    tmp_json = "/tmp/dms_latest_card_scan.json.tmp"
+                    with open(tmp_json, "w") as f:
+                        json.dump(scan_succ_info, f)
+                    os.replace(tmp_json, "/tmp/dms_latest_card_scan.json")
+                except Exception:
+                    pass
+
+        # Phát 1 tiếng còi pip khi xác minh thông tin lái xe thành công
+        trigger_driver_verified_beep()
 
         # DMS đã khởi động và camera đã ổn định trước khi hàm này được gọi.
-        # Gửi thông tin tài xế ngay trước khi chuyển sang bước quét mặt.
+        # Gửi thông tin tài xế kèm ảnh chụp ngay trước khi chuyển sang bước quét mặt.
         try:
             from telegram_bot import send_telegram_alert_async
             send_telegram_alert_async(
-                "🆔 THÔNG TIN TÀI XẾ ĐÃ ĐƯỢC NHẬN!\n"
+                "🆔 THÔNG TIN TÀI XẾ ĐÃ ĐƯỢC XÁC MINH!\n"
                 f"👤 Họ tên: {driver_info.get('name', 'Chưa xác định')}\n"
-                f"🪪 VNeID/CCCD: {driver_info.get('vneid', 'Chưa xác định')}\n"
+                f"🪪 VNeID/CCCD/GPLX: {driver_info.get('vneid', 'Chưa xác định')}\n"
                 f"🚗 Hạng bằng: {driver_info.get('license_class', 'B2')}\n"
                 f"⏰ Thời gian: {now_str}\n"
-                "📍 Hệ thống DMS đã sẵn sàng, chuyển sang quét khuôn mặt."
+                "📍 Hệ thống DMS đã sẵn sàng, chuyển sang bước quét khuôn mặt.",
+                frame=snapshot_frame
             )
         except Exception as e:
             print(f"[WARN] Không gửi được thông tin tài xế: {e}")
@@ -532,6 +615,41 @@ threading.Thread(target=alarm_worker, daemon=True).start()
 oled = get_oled_manager()
 if oled.is_available():
     oled.start()
+
+# --- Khởi động Module Quản lý Thẻ RFID RC522 ---
+current_latest_frame = None
+
+def handle_rfid_scan_callback(driver_data):
+    global auth_state, is_processing_vneid, vneid_authenticated, driver_info, current_latest_frame
+    if not driver_data:
+        return
+    if driver_data.get("success"):
+        driver_name = driver_data["name"]
+        vneid_num = driver_data["vneid"]
+        lic_class = driver_data.get("license_class", "B2")
+        print(f"\n[RFID AUTH SUCCESS] >>> Quẹt thẻ RFID hợp lệ: {driver_name} | CCCD: {vneid_num} | Hạng: {lic_class}")
+        if not is_processing_vneid:
+            is_processing_vneid = True
+            snap = current_latest_frame.copy() if current_latest_frame is not None else np.zeros((480, 640, 3), dtype=np.uint8)
+            verified_driver = {
+                "name": driver_name,
+                "vneid": vneid_num,
+                "license_class": lic_class,
+                "method": "RFID_RC522"
+            }
+            threading.Thread(
+                target=process_vneid_async,
+                args=(snap, verified_driver),
+                daemon=True
+            ).start()
+    else:
+        reason = driver_data.get("reason", "UNKNOWN")
+        uid = driver_data.get("uid", "")
+        print(f"\n[RFID AUTH REJECTED] Thẻ UID {uid} không hợp lệ ({reason})")
+        play_pc_beep_double(force=True)
+
+rfid_mgr = RFIDManager(on_card_detected_callback=handle_rfid_scan_callback)
+rfid_mgr.start()
 
 # --- Các Hàm Tính Toán Chỉ Số ---
 
@@ -1125,13 +1243,12 @@ def main():
 
         if auth_state == "VNEID_REQ":
             if is_processing_vneid:
-                print("[SCAN BUTTON] Ảnh CCCD/VNeID đang được xử lý nền, bỏ qua lần bấm này.")
+                print("[SCAN BUTTON] Ảnh giấy tờ đang được AI xử lý nền, bỏ qua lần bấm này.")
                 return
-            # Chỉ ở bước này nút mới chụp CCCD/VNeID và gửi cho luồng xử lý nền.
             vneid_auth_trigger = True
-            print("[SCAN BUTTON] Chụp CCCD/VNeID để xử lý tự động.")
+            print("[SCAN BUTTON] Đã bấm nút: Chụp ảnh giấy tờ cá nhân (CCCD/Bằng lái xe) để AI bóc tách.")
         elif vneid_authenticated:
-            # Sau khi VNeID thành công, mọi lần bấm chỉ hiệu chuẩn/quét lại khuôn mặt.
+            # Sau khi xác minh thành công, mọi lần bấm tiếp theo sẽ hiệu chuẩn/quét lại khuôn mặt.
             restart_face_scan()
         else:
             print(f"[SCAN BUTTON] Bỏ qua do trạng thái không hợp lệ: {auth_state}")
@@ -1233,6 +1350,7 @@ def main():
             cv2.putText(frame, "Connect a webcam to use real detection", (120, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
             
         h, w = frame.shape[:2]
+        current_latest_frame = frame
 
         # Chỉ nhận xác thực sau khi DMS hoàn tất khởi động/làm ấm camera. Khối
         # này vẫn chạy ở mọi trạng thái để không bỏ sót tín hiệu web mới.
@@ -1436,40 +1554,32 @@ def main():
             mouth_h = int(25 * (mar / 0.7))
             cv2.ellipse(frame, (320, 250), (mouth_w, max(2, mouth_h)), 0, 0, 360, (0, 0, 255), -1)
 
-        # 4. Quản lý trạng thái khởi động & xác thực (VNeID -> Telegram & Session -> Face Scan -> Active)
+        # 4. Quản lý trạng thái khởi động & xác thực (Xác minh thông tin lái xe -> Quét mặt -> Giám sát)
         if auth_state == "VNEID_REQ":
             alarm_level = 4  # 2 âm còi liên tiếp, 3s sau kêu tiếp
             if not vneid_prompt_played:
                 play_voice_prompt_async("req_vneid")
                 vneid_prompt_played = True
-                print("[AUTH] Đã phát âm thanh yêu cầu xác thực thẻ VNeID / CCCD.")
+                print("[AUTH] Yêu cầu xác minh thông tin lái xe (1. Nút nhấn scan giấy tờ, 2. Web Dashboard, 3. Quẹt thẻ RFID).")
 
-            # 1. Tự động quét mã QR cực nhanh (2ms) trong luồng camera
-            if not vneid_auth_trigger and not is_processing_vneid:
-                scan_res = quick_scan_qr(frame)
-                if scan_res and scan_res.get("success"):
-                    driver_info["vneid"] = scan_res["vneid"]
-                    driver_info["name"] = scan_res["name"]
-                    print(f"[AUTH SCANNER] Đã tự động nhận diện thẻ CCCD ({scan_res['method']}): {driver_info['vneid']} - {driver_info['name']}")
-                    vneid_auth_trigger = True
-
-            # Hiển thị giao diện thông báo Yêu cầu VNeID trên camera
-            cv2.rectangle(frame, (30, 30), (w - 30, 160), (0, 0, 0), -1)
-            cv2.rectangle(frame, (30, 30), (w - 30, 160), (0, 255, 255), 2)
+            # Hiển thị giao diện thông báo Bước 1: Xác minh thông tin lái xe trên camera
+            cv2.rectangle(frame, (25, 25), (w - 25, 160), (0, 0, 0), -1)
+            cv2.rectangle(frame, (25, 25), (w - 25, 160), (0, 255, 255), 2)
             if is_processing_vneid:
-                cv2.putText(frame, "[ CHUP ANH OK - DANG XU LY TOI DA 3 GIAY... ]", (50, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 0), 2, cv2.LINE_AA)
-                cv2.putText(frame, "Anh da luu; ket qua se cap nhat len Web Dashboard.", (50, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(frame, "[ CHUP ANH OK - DANG BOC TACH GIAY TO CA NHAN... ]", (40, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 0), 2, cv2.LINE_AA)
+                cv2.putText(frame, "Dang xu ly AI OCR / QR trong luong rieng (toi da 3s)...", (40, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(frame, "Vui long giu the hoac xac minh qua Web/RFID.", (40, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1, cv2.LINE_AA)
             else:
-                cv2.putText(frame, "YEU CAU XAC THUC THE VNeID / CCCD", (50, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(frame, "Dua the CCCD truoc camera hoac bam 'V' de xac thuc", (50, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.putText(frame, "[Gio the CCCD / Nhan 'V' / Click nut GUI de xac thuc]", (50, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 0), 1, cv2.LINE_AA)
+                cv2.putText(frame, "BUOC 1: XAC MINH THONG TIN LAI XE", (40, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(frame, "1. An nut nhan de scan giay to <CCCD, Bang lai xe>", (40, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(frame, "2. Xac minh tren Web Dashboard  |  3. Quet the RFID", (40, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 255, 0), 1, cv2.LINE_AA)
+                cv2.putText(frame, "[An nut GPIO 22 / Phim 'V' / Click nut Dashboard de scan]", (40, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (200, 200, 200), 1, cv2.LINE_AA)
 
-            # Tín hiệu khi ấn nút bấm (TỨC THÌ 0ms - đNy vào luồng ngầm)
+            # Tín hiệu khi ấn nút bấm chụp giấy tờ cá nhân (TỨC THÌ 0ms - đẩy vào luồng ngầm)
             if vneid_auth_trigger and not is_processing_vneid:
                 vneid_auth_trigger = False
                 is_processing_vneid = True
-                play_pc_beep_single()
-                print("[INSTANT CAPTURE] Lập tức chụp ảnh và đẩy vào luồng xử lý ngầm!")
+                print("[INSTANT CAPTURE] Lập tức chụp ảnh giấy tờ và đẩy vào luồng AI OCR xử lý ngầm!")
                 snapshot_frame = frame.copy()
                 threading.Thread(target=process_vneid_async, args=(snapshot_frame,), daemon=True).start()
 
@@ -1807,20 +1917,22 @@ def main():
         cv2.line(dashboard, (15, 30), (305, 30), (100, 100, 100), 1)
 
         if auth_state == "VNEID_REQ":
-            cv2.putText(dashboard, "TRANG THAI: CHO VNeID", (20, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(dashboard, f" Tai xe: {driver_info['name']}", (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
-            cv2.putText(dashboard, f" VNeID: {driver_info['vneid']}", (20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
-            cv2.putText(dashboard, f" Bang lai: {driver_info['license_class']}", (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-            cv2.line(dashboard, (15, 128), (305, 128), (100, 100, 100), 1)
-            cv2.putText(dashboard, " AM THANH THONG BAO:", (20, 148), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 0), 1)
-            cv2.putText(dashboard, " - Phat tieng giong noi thong bao", (20, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
-            cv2.putText(dashboard, " - Coi 2 tieng lien tiep (lap 3s)", (20, 188), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 255, 255), 1)
+            cv2.putText(dashboard, "TRANG THAI: XAC MINH LAI XE", (20, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(dashboard, f" Tai xe: {driver_info['name']}", (20, 74), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
+            cv2.putText(dashboard, f" VNeID/CCCD: {driver_info['vneid']}", (20, 93), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
+            cv2.putText(dashboard, f" Bang lai: {driver_info['license_class']}", (20, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.line(dashboard, (15, 124), (305, 124), (100, 100, 100), 1)
+            cv2.putText(dashboard, " 3 PHUONG THUC XAC MINH:", (20, 144), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 0), 1)
+            cv2.putText(dashboard, " 1. An nut de scan CCCD/GPLX", (20, 166), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
+            cv2.putText(dashboard, " 2. Xac minh tren Web Dashboard", (20, 186), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
+            cv2.putText(dashboard, " 3. Quet the RFID RC522", (20, 206), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 255, 255), 1)
+            cv2.putText(dashboard, " (Xac minh xong se co 1 tieng bip)", (20, 226), cv2.FONT_HERSHEY_SIMPLEX, 0.34, (150, 255, 150), 1)
             
             # Interactive Button
             cv2.rectangle(dashboard, (15, 422), (305, 458), (0, 200, 255), -1)
             cv2.rectangle(dashboard, (15, 422), (305, 458), (255, 255, 255), 1)
-            cv2.putText(dashboard, "[ XAC THUC VNeID (Phim V) ]", (24, 444), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2, cv2.LINE_AA)
-            cv2.putText(dashboard, "Click nut tren hoac nhan 'v' de quet card", (15, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (140, 140, 140), 1)
+            cv2.putText(dashboard, "[ SCAN GIAY TO (Nut / Phim V) ]", (20, 444), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.putText(dashboard, "Nhan nut de scan CCCD / Bang lai xe", (15, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (140, 140, 140), 1)
 
         elif auth_state == "FACE_REQ":
             cv2.putText(dashboard, "VNeID: DA XAC THUC OK", (20, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 255, 0), 2, cv2.LINE_AA)

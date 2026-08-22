@@ -65,23 +65,27 @@ def send_telegram_alert_async(message, frame=None, audio_file=None):
         try:
             # 1. Gửi ảnh nếu có frame
             if frame is not None:
-                tmp_img = "/tmp/dms_alert_frame.jpg"
+                tmp_img = f"/tmp/dms_alert_frame_{time.time_ns()}.jpg"
                 cv2.imwrite(tmp_img, frame)
-                with open(tmp_img, "rb") as photo:
-                    _make_req(
-                        "sendPhoto",
-                        data={"chat_id": chat_id, "caption": f"🚨 [AI DMS ALERT] 🚨\n{message}"},
-                        files={"photo": photo}
-                    )
-                if os.path.exists(tmp_img):
-                    try:
-                        os.remove(tmp_img)
-                    except Exception:
-                        pass
+                try:
+                    with open(tmp_img, "rb") as photo:
+                        caption_text = f"🚨 [AI DMS ALERT] 🚨\n{message}" if not message.startswith(("🚨", "🆔", "🧪")) else message
+                        _make_req(
+                            "sendPhoto",
+                            data={"chat_id": chat_id, "caption": caption_text},
+                            files={"photo": photo}
+                        )
+                finally:
+                    if os.path.exists(tmp_img):
+                        try:
+                            os.remove(tmp_img)
+                        except Exception:
+                            pass
             else:
+                msg_text = f"🚨 [AI DMS ALERT] 🚨\n{message}" if not message.startswith(("🚨", "🆔", "🧪")) else message
                 _make_req(
                     "sendMessage",
-                    data={"chat_id": chat_id, "text": f"🚨 [AI DMS ALERT] 🚨\n{message}"}
+                    data={"chat_id": chat_id, "text": msg_text}
                 )
 
             # 2. Gửi file ghi âm âm thanh khoang lái nếu có

@@ -34,7 +34,10 @@ def list_sessions():
             return
             
         cursor.execute("""
-            SELECT session_id, start_time, end_time, duration_seconds, 
+            SELECT session_id, 
+                   COALESCE(NULLIF(driver_name, ''), 'Người lạ') AS driver_name,
+                   COALESCE(NULLIF(vneid_card, ''), 'Không xác định') AS vneid_card,
+                   start_time, end_time, duration_seconds, 
                    distraction_count, drowsiness_count, yawn_count, 
                    avg_fatigue_score, max_fatigue_score 
             FROM dms_sessions 
@@ -47,23 +50,25 @@ def list_sessions():
             conn.close()
             return
 
-        print("=================================================================================================================")
-        print("                                   LỊCH SỬ TIẾN TRÌNH HÀNH TRÌNH LÁI XE (DMS SESSIONS)")
-        print("=================================================================================================================")
-        print(f"{'ID':<4} | {'Thoi Gian Bat Dau':<19} | {'Thoi Gian Ket Thuc':<19} | {'Thoi Gian':<9} | {'Mat TT':<6} | {'Ngu Ngan':<8} | {'Ngap':<4} | {'FS Trung Binh':<13} | {'FS Cao Nhat':<11}")
-        print("-" * 113)
+        print("==================================================================================================================================")
+        print("                                       LỊCH SỬ TIẾN TRÌNH HÀNH TRÌNH LÁI XE (DMS SESSIONS)")
+        print("==================================================================================================================================")
+        print(f"{'ID':<4} | {'Nguoi Lai Xe':<16} | {'CCCD/VNeID':<14} | {'Bat Dau':<19} | {'Ket Thuc':<19} | {'Thoi Gian':<9} | {'Mat TT':<6} | {'Ngu':<4} | {'Ngap':<4} | {'FS TB':<6} | {'FS Max':<6}")
+        print("-" * 130)
 
         for row in rows:
-            sid, stime, etime, dur, dis_cnt, drow_cnt, yawn_cnt, avg_f, max_f = row
+            sid, dname, vcard, stime, etime, dur, dis_cnt, drow_cnt, yawn_cnt, avg_f, max_f = row
             dur_str = format_duration(dur)
             stime_str = stime if stime else "N/A"
             etime_str = etime if etime else "N/A"
+            dname_str = (dname[:14] + '..') if len(dname) > 16 else dname
+            vcard_str = (vcard[:12] + '..') if len(vcard) > 14 else vcard
             avg_f_str = f"{avg_f:.2f}" if avg_f is not None else "0.00"
             max_f_str = f"{max_f:.2f}" if max_f is not None else "0.00"
 
-            print(f"#{sid:<3} | {stime_str:<19} | {etime_str:<19} | {dur_str:<9} | {dis_cnt:<6} | {drow_cnt:<8} | {yawn_cnt:<4} | {avg_f_str:<13} | {max_f_str:<11}")
+            print(f"#{sid:<3} | {dname_str:<16} | {vcard_str:<14} | {stime_str:<19} | {etime_str:<19} | {dur_str:<9} | {dis_cnt:<6} | {drow_cnt:<4} | {yawn_cnt:<4} | {avg_f_str:<6} | {max_f_str:<6}")
 
-        print("=================================================================================================================")
+        print("==================================================================================================================================")
         print(f"Tong so phien hanh trinh da luu: {len(rows)}")
 
     except Exception as e:

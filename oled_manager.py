@@ -249,7 +249,7 @@ class OLEDManager:
                 if lvl >= 2:
                     header_status = "! CANH BAO !"
                 elif auth == "VNEID_REQ":
-                    header_status = "QUET VNEID"
+                    header_status = "XAC MINH TX"
                 elif auth == "FACE_REQ":
                     header_status = "XAC THUC MAT"
                 elif auth == "MONITORING":
@@ -262,14 +262,14 @@ class OLEDManager:
 
                 # ================= 2. BODY (14 -> 50) =================
                 if auth == "VNEID_REQ":
-                    # Màn hình yêu cầu VNeID / CCCD
+                    # Màn hình yêu cầu xác minh thông tin lái xe
                     draw.rectangle((2, 16, 125, 48), outline=1)
                     if flash:
-                        draw.text((10, 20), ">> QUET THE <<", fill=1, font=self.font)
-                        draw.text((8, 33), "VNeID / CCCD QR", fill=1, font=self.font)
+                        draw.text((6, 20), ">> XAC MINH TX <<", fill=1, font=self.font)
+                        draw.text((4, 33), "1.NUT 2.WEB 3.RFID", fill=1, font=self.font)
                     else:
-                        draw.text((14, 20), "[ DUA THE ]", fill=1, font=self.font)
-                        draw.text((12, 33), "VAO CAMERA...", fill=1, font=self.font)
+                        draw.text((10, 20), "[ AN NUT SCAN ]", fill=1, font=self.font)
+                        draw.text((8, 33), "CCCD/GPLX/RFID", fill=1, font=self.font)
 
                 elif auth == "FACE_REQ":
                     # Màn hình yêu cầu căn chỉnh khuôn mặt

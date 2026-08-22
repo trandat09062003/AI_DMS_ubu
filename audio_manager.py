@@ -127,11 +127,11 @@ def _play_wav_native(file_path):
             return True
     return False
 
-ENABLE_SPEAKER_BEEP = False  # Đặt False để tắt tiếng còi bíp thô trên loa, chỉ dùng giọng nói tiếng Việt chuẩn
+ENABLE_SPEAKER_BEEP = True  # Bật âm thanh còi bíp trên loa / jack 3.5mm
 
-def play_pc_beep():
+def play_pc_beep(force=False):
     """Phát âm thanh còi bíp cảnh báo mệt mỏi/buồn ngủ (chạy không nghẽn)"""
-    if not ENABLE_SPEAKER_BEEP:
+    if not ENABLE_SPEAKER_BEEP and not force:
         return
     def _play():
         if _is_voice_playing:
@@ -140,26 +140,28 @@ def play_pc_beep():
     
     threading.Thread(target=_play, daemon=True).start()
 
-def play_pc_beep_double():
-    """Phát 2 âm còi bíp liên tiếp (Yêu cầu xác thực VNeID)"""
-    if not ENABLE_SPEAKER_BEEP:
+def play_pc_beep_double(force=False):
+    """Phát 2 âm còi bíp liên tiếp (Báo lỗi / Không hợp lệ)"""
+    if not ENABLE_SPEAKER_BEEP and not force:
         return
     def _play():
         if _is_voice_playing:
             return
         p = os.path.join(PROMPT_DIR, "beep_double.wav")
+        if not os.path.exists(p):
+            p = BEEP_FILE
         _play_wav_native(p)
             
     threading.Thread(target=_play, daemon=True).start()
 
-def play_pc_beep_single():
-    """Phát 1 âm còi bíp ngắt quãng (Yêu cầu xác thực khuôn mặt)"""
-    if not ENABLE_SPEAKER_BEEP:
+def play_pc_beep_single(force=False):
+    """Phát 1 âm còi bíp pip (Xác nhận thành công / Quét hợp lệ)"""
+    if not ENABLE_SPEAKER_BEEP and not force:
         return
     def _play():
-        if _is_voice_playing:
-            return
         p = os.path.join(PROMPT_DIR, "beep_single.wav")
+        if not os.path.exists(p):
+            p = BEEP_FILE
         _play_wav_native(p)
             
     threading.Thread(target=_play, daemon=True).start()

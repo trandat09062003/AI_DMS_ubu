@@ -16,6 +16,8 @@ hiển thị OLED I2C 128x64, tự động ghi âm cabin 10s và gửi ảnh c�
 - drowsiness_detector.py : Module xử lý AI, luồng camera, tính toán EAR/MAR, suy luận LSTM.
 - lstm_model.py          : Định nghĩa kiến trúc PyTorch LSTM.
 - lstm_drowsiness.pth    : Trọng số mô hình LSTM đã huấn luyện.
+- rfid_manager.py        : Quản lý đầu đọc thẻ RFID RC522 (SPI), xác thực tài xế từ CSDL SQLite.
+- manage_rfid.py         : Công cụ CLI quản lý thẻ RFID (đăng ký, tra cứu, danh sách tài xế).
 - audio_manager.py       : Quản lý âm thanh Jack 3.5mm, TDA2050, giọng nói AI, ghi âm Micro USB.
 - audio_prompts/         : File âm thanh mẫu (còi bíp, thông báo Tiếng Việt).
 - oled_manager.py        : Driver I2C SSD1306 điều khiển màn hình OLED 128x64.
@@ -26,6 +28,7 @@ hiển thị OLED I2C 128x64, tự động ghi âm cabin 10s và gửi ảnh c�
 - run_dms.sh             : Script khởi chạy toàn bộ hệ thống bằng 1 lệnh duy nhất.
 - view_history.py        : Công cụ CLI truy vấn & xuất lịch sử SQLite ra file CSV.
 - test_hardware.py       : Công cụ kiểm tra toàn diện phần cứng.
+- test_rfid.py           : Kiểm tra riêng đầu đọc thẻ RFID RC522 qua giao tiếp SPI.
 - test_speaker.py        : Kiểm tra riêng âm thanh & giọng nói Tiếng Việt.
 - test_oled.py           : Kiểm tra riêng màn hình OLED 128x64.
 - test_camera.py         : Kiểm tra riêng camera USB, độ phân giải & FPS.
@@ -35,7 +38,16 @@ hiển thị OLED I2C 128x64, tự động ghi âm cabin 10s và gửi ảnh c�
 +-------------------+---------------+------------------+---------------------+
 | Thiết bị / Module | Chân Module   | Chân Raspberry Pi| Chân Vật Lý (Pin No)|
 +-------------------+---------------+------------------+---------------------+
-| Màn hình OLED     | VCC           | 3.3V Power       | Pin 1               |
+| Đầu đọc Thẻ RFID  | 3.3V (VCC)    | 3.3V Power       | Pin 1 (hoặc Pin 17) |
+| RC522 (Chuẩn SPI) | RST           | GPIO 25          | Pin 22              |
+|                   | GND           | Ground           | Pin 6 (hoặc Pin 25) |
+|                   | MISO / SDO    | GPIO 9 (SPI MISO)| Pin 21              |
+|                   | MOSI / SDI    | GPIO 10(SPI MOSI)| Pin 19              |
+|                   | SCK / SCLK    | GPIO 11(SPI SCLK)| Pin 23              |
+|                   | SDA / NSS     | GPIO 8 (SPI CE0) | Pin 24              |
+|                   | IRQ           | (Không nối)      | Bỏ trống            |
++-------------------+---------------+------------------+---------------------+
+| Màn hình OLED     | VCC           | 3.3V Power       | Pin 1 (hoặc Pin 17) |
 | SSD1306 (I2C)     | GND           | Ground           | Pin 9 (hoặc Pin 6)  |
 |                   | SDA           | GPIO 2 (SDA)     | Pin 3               |
 |                   | SCL           | GPIO 3 (SCL)     | Pin 5               |
@@ -57,16 +69,17 @@ hiển thị OLED I2C 128x64, tự động ghi âm cabin 10s và gửi ảnh c�
 | Camera USB & Mic  | Cáp USB       | Cổng USB 3.0/2.0 | Cổng USB Raspberry  |
 +-------------------+---------------+------------------+---------------------+
 
-4. QUY TRÌNH VẬN HÀNH THỰC TẾ (TỪ QUÉT CCCD ĐẾN KẾT THÚC CHUYẾN ĐI)
+4. QUY TRÌNH VẬN HÀNH THỰC TẾ (TỪ QUÉT CCCD/RFID ĐẾN KẾT THÚC CHUYẾN ĐI)
 --------------------------------------------------------------------------------
 1. BẬT NGUỒN & KẾT NỐI WI-FI / WEB:
    - Cấp nguồn cho Raspberry Pi. Hệ thống tự phát Wi-Fi: "AI_DMS_Hotspot" (Pass: 1234567890).
    - Dùng điện thoại kết nối Wi-Fi trên -> Mở trình duyệt vào: http://wifi.local.
 
-2. XÁC THỰC CCCD / VNeID (Chọn 1 trong 3 cách):
-   - Cách 1 (Tự động): Giơ thẻ CCCD hoặc mã QR VNeID trước camera (quét tự động trong 2ms).
-   - Cách 2 (Nút bấm): Nhấn nút cứng trên xe (GPIO 22) hoặc phím 'V'/'Space' để chụp & OCR.
-   - Cách 3 (Qua Web): Mở http://wifi.local -> Tab "Xác Thực VNeID" -> Chọn hồ sơ nhanh,
+2. XÁC THỰC CCCD / VNeID / RFID (Chọn 1 trong 4 cách):
+   - Cách 1 (Thẻ RFID RC522): Quẹt thẻ RFID tài xế đã đăng ký vào đầu đọc RC522 (tự động nhận diện < 100ms).
+   - Cách 2 (Tự động Camera): Giơ thẻ CCCD hoặc mã QR VNeID trước camera (quét tự động trong 2ms).
+   - Cách 3 (Nút bấm): Nhấn nút cứng trên xe (GPIO 22) hoặc phím 'V'/'Space' để chụp & OCR.
+   - Cách 4 (Qua Web): Mở http://wifi.local -> Tab "Xác Thực VNeID" -> Chọn hồ sơ nhanh,
      chụp ảnh thẻ hoặc nhập CCCD/Tên -> Bấm "Xác Thực".
    - Sau khi xác thực, hệ thống phát loa: "Xác thực căn cước công dân và VNeID thành công!".
 
